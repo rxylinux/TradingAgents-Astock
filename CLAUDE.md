@@ -6,7 +6,7 @@
 - **仓库**: https://github.com/simonlin1212/TradingAgents-astock
 - **协议**: Apache 2.0
 - **Python**: >=3.10
-- **当前版本**: 0.6.0（2026-08-16 发布，新增大盘指数分析 + 资金流向分析）
+- **当前版本**: 0.6.1（2026-08-23 发布，新增 7 位 AI 分析师实时作业看板 + 智谱 GLM-5.3/5.2 深度适配）
   ⚠️ 改版本号时**三处要一起改**：`pyproject.toml` / `CHANGELOG.md` / 这一行。漏了这行会让后续 agent 和发版流程读到旧版本（`tests/test_version_consistency.py` 会拦）。
 
 ## 架构

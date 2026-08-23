@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Breaking changes within the 0.x line are called out explicitly.
 
+## [0.6.1] — 2026-08-23
+
+### 新增：7 位 AI 分析师实时独立作业进度看板
+
+- **实时作业矩阵**（`web/components/progress_panel.py`）：在 Web 界面中央实时以独立卡片形式展现 7 位分析师（技术、情绪、新闻、基本面、政策、游资、解禁）的微观工作进度；
+- **多状态动态标记**：清晰区分「数据调取中（展示具体工具标签）」、「深度模型推理中」、「报告已完成（统计字数与耗时）」以及「等待调度」；
+- **子进度指示条**：每个 Agent 卡片内含独立完成度进度条，直观反映并发任务的执行状态；
+- **报告渐进式展示**：单分析师产出报告后即刻在下方生成可展开预览，无需等待全流程结束。
+
+### 优化：智谱 GLM Coding 套餐深度适配
+
+- **模型版本更新**：默认深度决策模型升级为最新旗舰 **`GLM-5.3`**，快速分析模型采用 **`GLM-5.2`**；
+- **专属 Coding 端点支持**：自动适配智谱 Coding 套餐专属 Base URL（`https://open.bigmodel.cn/api/coding/paas/v4`）；
+- **Web / CLI 默认配置统一**：全局默认优先采用智谱 GLM，修复前端点击「开始分析」后的即时刷新响应。
+
 ## [0.6.0] — 2026-08-16
 
 ### 新增：大盘指数分析（完整流水线）
