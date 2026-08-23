@@ -91,12 +91,14 @@ MODEL_OPTIONS: ProviderModeOptions = {
     },
     "glm": {
         "quick": [
+            ("GLM-5.2 - Balanced speed and reasoning", "glm-5.2"),
             ("GLM-4.7 - Fast and efficient", "glm-4.7"),
             ("GLM-5", "glm-5"),
             ("Custom model ID", "custom"),
         ],
         "deep": [
             ("GLM-5.3 - Latest flagship model", "glm-5.3"),
+            ("GLM-5.2 - High capability", "glm-5.2"),
             ("GLM-5.1", "glm-5.1"),
             ("GLM-5", "glm-5"),
             ("Custom model ID", "custom"),
