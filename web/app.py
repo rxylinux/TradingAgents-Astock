@@ -284,6 +284,7 @@ if start_req:
         config=_build_config(),
         tracker=tracker,
     )
+    st.rerun()
 
 
 # ── Main area state machine ─────────────────────────────────────────────────

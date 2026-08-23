@@ -402,6 +402,7 @@ def render_sidebar() -> None:
                 "analysis_type": analysis_type,
             }
             st.session_state["viewing_history"] = None
+            st.rerun()
 
     _render_analysis_controls(ticker, trade_date)
 
