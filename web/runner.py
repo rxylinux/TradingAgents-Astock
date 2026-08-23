@@ -254,6 +254,11 @@ def _run(ticker: str, trade_date: str, config: dict, tracker: ProgressTracker) -
         "selected_analysts",
         ["market", "social", "news", "fundamentals", "policy", "hot_money", "lockup"],
     )
+
+    # 立即更新 7 位分析师为活动状态，提供秒级视觉响应反馈
+    for aid in selected_analysts:
+        tracker.set_agent_status(aid, "running", "正在并发启动与分配分析任务...")
+
     if config.get("instrument_type") == "index":
         graph = graph_cls(
             debug=True,
