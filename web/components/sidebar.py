@@ -19,10 +19,10 @@ from web.history import (
 
 # Provider display names in recommended order
 _PROVIDERS: list[tuple[str, str]] = [
-    ("MiniMax（推荐·国内直连）", "minimax"),
+    ("智谱 GLM（推荐·Coding 套餐）", "glm"),
+    ("MiniMax（国内直连）", "minimax"),
     ("DeepSeek", "deepseek"),
     ("通义千问 Qwen", "qwen"),
-    ("智谱 GLM", "glm"),
     ("OpenAI", "openai"),
     ("Anthropic", "anthropic"),
     ("Google Gemini", "google"),
@@ -146,12 +146,15 @@ def _render_analysis_controls(raw_ticker: str, trade_date_value: date) -> None:
 def _render_llm_config() -> None:
     """Render LLM provider and model selection controls."""
 
+    default_provider = DEFAULT_CONFIG.get("llm_provider", "glm")
+    provider_default_idx = _PROVIDER_KEYS.index(default_provider) if default_provider in _PROVIDER_KEYS else 0
+
     provider_idx = st.selectbox(
         "LLM 供应商",
         range(len(_PROVIDERS)),
         format_func=lambda i: _PROVIDER_DISPLAY[i],
         key="llm_provider_idx",
-        index=_PROVIDER_KEYS.index("deepseek"),
+        index=provider_default_idx,
         help="选择你配置了 API Key 的供应商",
     )
     provider_key = _PROVIDER_KEYS[provider_idx]
@@ -166,20 +169,26 @@ def _render_llm_config() -> None:
         deep_labels = [label for label, _ in deep_options]
         deep_values = [value for _, value in deep_options]
 
+        default_quick = DEFAULT_CONFIG.get("quick_think_llm", "glm-5.2")
+        quick_default_idx = quick_values.index(default_quick) if default_quick in quick_values else 0
         quick_idx = st.selectbox(
             "快速思考模型",
             range(len(quick_options)),
             format_func=lambda i: quick_labels[i],
             key="quick_model_idx",
+            index=quick_default_idx,
             help="用于常规分析任务，速度优先",
         )
         st.session_state["quick_think_llm"] = quick_values[quick_idx]
 
+        default_deep = DEFAULT_CONFIG.get("deep_think_llm", "glm-5.3")
+        deep_default_idx = deep_values.index(default_deep) if default_deep in deep_values else 0
         deep_idx = st.selectbox(
             "深度思考模型",
             range(len(deep_options)),
             format_func=lambda i: deep_labels[i],
             key="deep_model_idx",
+            index=deep_default_idx,
             help="用于辩论/决策等需要深度推理的任务",
         )
         st.session_state["deep_think_llm"] = deep_values[deep_idx]
