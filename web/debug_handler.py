@@ -611,7 +611,9 @@ class AgentDebugCallbackHandler(BaseCallbackHandler):
         detail_record = {
             "tool_name": tool_name,
             "args": args,
-            "output": raw_payload,
+            # 键名与 agent_debug.render_tools_tab / extract_agent_debug_from_state
+            # 的读取侧对齐（此前叫 output，运行中面板的工具返回恒显示空态）
+            "payload": raw_payload,
             "duration": round(duration, 3),
             "timestamp": time.time(),
             "status": "success",
@@ -665,7 +667,7 @@ class AgentDebugCallbackHandler(BaseCallbackHandler):
         detail_record = {
             "tool_name": tool_name,
             "args": args,
-            "output": f"ERROR: {type(error).__name__}: {str(error)}",
+            "payload": f"ERROR: {type(error).__name__}: {str(error)}",
             "duration": round(duration, 3),
             "timestamp": time.time(),
             "status": "error",

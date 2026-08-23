@@ -1,5 +1,7 @@
 import logging
 import os
+import random
+import time
 from typing import Any, Optional
 
 from langchain_core.messages import AIMessage
@@ -13,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 class NormalizedChatOpenAI(ChatOpenAI):
-    """ChatOpenAI with normalized content output.
+    """ChatOpenAI with normalized content output and automatic rate-limit backoff.
 
     The Responses API returns content as a list of typed blocks
     (reasoning, text, etc.). ``invoke`` normalizes to string for
@@ -28,9 +30,30 @@ class NormalizedChatOpenAI(ChatOpenAI):
     """
 
     def invoke(self, input, config=None, **kwargs):
-        response = super().invoke(input, config, **kwargs)
-        warn_if_truncated(response, self.model_name)
-        return normalize_content(response)
+        max_attempts = 5
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = super().invoke(input, config, **kwargs)
+                warn_if_truncated(response, self.model_name)
+                return normalize_content(response)
+            except Exception as e:
+                err_str = str(e)
+                is_rate_limit = (
+                    "429" in err_str
+                    or "1302" in err_str
+                    or "RateLimitError" in type(e).__name__
+                    or "速率限制" in err_str
+                    or "rate limit" in err_str.lower()
+                )
+                if is_rate_limit and attempt < max_attempts:
+                    sleep_time = (2 ** attempt) + random.uniform(0.5, 1.5)
+                    logger.warning(
+                        "LLM call rate-limited for %s (attempt %d/%d). Sleeping %.1fs before retrying: %s",
+                        self.model_name, attempt, max_attempts, sleep_time, e,
+                    )
+                    time.sleep(sleep_time)
+                else:
+                    raise
 
     def with_structured_output(self, schema, *, method=None, **kwargs):
         capabilities = get_capabilities(self.model_name)
@@ -227,6 +250,8 @@ class OpenAIClient(BaseLLMClient):
         for key in _PASSTHROUGH_KWARGS:
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
+
+        llm_kwargs.setdefault("max_retries", 5)
 
         # Native OpenAI: use Responses API for consistent behavior across
         # all model families. Third-party providers use Chat Completions.

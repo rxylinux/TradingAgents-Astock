@@ -146,7 +146,9 @@ def test_agent_debug_callback_tool_capture() -> None:
     assert len(tool_details) == 1
     assert tool_details[0]["tool_name"] == "get_stock_data"
     assert tool_details[0]["args"] == {"ticker": "600519", "look_back_days": 30}
-    assert tool_details[0]["output"] == mock_output
+    # 键名 payload：与 agent_debug.render_tools_tab 的读取侧一致（旧名 output 会让
+    # 运行中面板的工具返回恒显示空态）
+    assert tool_details[0]["payload"] == mock_output
     assert tool_details[0]["status"] == "success"
     assert tool_details[0]["duration"] >= 0.01
 
@@ -243,7 +245,7 @@ def test_agent_debug_callback_tool_error() -> None:
     tool_details = debug_info["tool_details"]
     assert len(tool_details) == 1
     assert tool_details[0]["status"] == "error"
-    assert "Network timeout" in tool_details[0]["output"]
+    assert "Network timeout" in tool_details[0]["payload"]
 
 
 def test_tracker_stop_request_and_mark_stopped_clears_debug_info() -> None:

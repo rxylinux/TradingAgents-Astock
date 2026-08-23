@@ -324,9 +324,14 @@ elif tracker and tracker.error:
     st.error(f"分析失败: {tracker.error}")
     st.caption("已完成阶段会保存在本地断点中；修复模型额度或配置后，可以继续未完成的部分。")
     if st.button("继续未完成任务", type="primary"):
+        # 带 .SH/.SZ 后缀的是指数任务，必须恢复为指数模式——否则会按个股图重建，
+        # 勾选里含 fundamentals/lockup 时指数标的会跑个股分析师（与侧栏恢复按钮一致）
+        from tradingagents.dataflows.index_registry import parse_index_ticker
+
         st.session_state["start_analysis"] = {
             "ticker": tracker.ticker,
             "trade_date": tracker.trade_date,
+            "analysis_type": "指数" if parse_index_ticker(tracker.ticker) else "个股",
         }
         st.session_state["viewing_history"] = None
         st.rerun()

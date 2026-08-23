@@ -199,42 +199,71 @@ class TestRunnerEventDetection(unittest.TestCase):
 
 
 class TestDebugModeUIComponents(unittest.TestCase):
-    """Test UI rendering functions for Debug Monitor and Diagnostics."""
+    """Test UI rendering functions for the live agent dashboard and diagnostics.
 
-    def test_agent_status_badge(self) -> None:
-        """Verify badge generation for different status codes."""
-        from web.components.progress_panel import _agent_status_badge
+    v0.6.1 重构后旧的 `_agent_status_badge` / `render_debug_monitor` 已并入
+    `_render_agent_card`（内联配色/徽章方案）与 `render_progress`（内含遥测
+    expander），这里按新 API 断言等价行为。
+    """
 
-        html, label, color = _agent_status_badge("done")
-        self.assertIn("已完成", label)
-        self.assertEqual(color, "#22c55e")
+    def test_agent_progress_pct(self) -> None:
+        """进度估算：done=100、error=100（终态）、pending 起步 5。"""
+        from web.components.progress_panel import _get_agent_progress_pct
 
-        html, label, color = _agent_status_badge("tool_calling")
-        self.assertIn("工具", label)
-        self.assertEqual(color, "#38bdf8")
+        self.assertEqual(_get_agent_progress_pct("done", 0), 100)
+        self.assertEqual(_get_agent_progress_pct("error", 0), 100)
+        self.assertEqual(_get_agent_progress_pct("pending", 0), 5)
+        self.assertEqual(_get_agent_progress_pct("running", 0), 40)
+        self.assertEqual(_get_agent_progress_pct("running", 2), 80)
+        self.assertEqual(_get_agent_progress_pct("tool_calling", 0), 30)
+        self.assertEqual(_get_agent_progress_pct("tool_calling", 10), 70)
 
-        html, label, color = _agent_status_badge("running")
-        self.assertIn("正在分析", label)
-        self.assertEqual(color, "#f59e0b")
+    @patch("streamlit.markdown")
+    def test_agent_card_badge_schemes(self, mock_md: MagicMock) -> None:
+        """每种状态的卡片徽章文案与配色方案必须落在渲染出的 HTML 里。"""
+        from web.components.progress_panel import _render_agent_card
 
-        html, label, color = _agent_status_badge("error")
-        self.assertIn("异常", label)
-        self.assertEqual(color, "#ef4444")
+        def _rendered_html(status: str) -> str:
+            _render_agent_card(
+                agent_id="market",
+                name="市场分析师",
+                icon="📊",
+                desc="技术面",
+                status=status,
+                detail="测试详情",
+                tool_calls=[],
+                metrics={},
+            )
+            self.assertTrue(mock_md.called)
+            args, _ = mock_md.call_args
+            return args[0]
 
-        html, label, color = _agent_status_badge("pending")
-        self.assertIn("等待中", label)
-        self.assertEqual(color, "#444444")
+        cases = [
+            ("done", "报告已完成", "#16a34a"),
+            ("tool_calling", "正在调取数据", "#0284c7"),
+            ("running", "正在研判分析", "#ea580c"),
+            ("error", "执行异常", "#dc2626"),
+            ("pending", "等待启动", "#e2e8f0"),
+        ]
+        for status, badge, color in cases:
+            with self.subTest(status=status):
+                mock_md.reset_mock()
+                html_out = _rendered_html(status)
+                self.assertIn(badge, html_out)
+                self.assertIn(color, html_out)
 
     @patch("streamlit.expander")
+    @patch("streamlit.progress")
     @patch("streamlit.columns")
     @patch("streamlit.markdown")
-    def test_render_debug_monitor(
-        self, mock_md: MagicMock, mock_cols: MagicMock, mock_exp: MagicMock
+    def test_render_progress_renders_agent_matrix_and_telemetry(
+        self, mock_md: MagicMock, mock_cols: MagicMock,
+        mock_progress: MagicMock, mock_exp: MagicMock,
     ) -> None:
-        """Verify render_debug_monitor executes and creates expanders and metrics."""
-        from web.components.progress_panel import render_debug_monitor
+        """render_progress 输出 7 分析师矩阵 + 遥测 expander（原 debug monitor 并入此处）。"""
+        from web.components.progress_panel import render_progress
 
-        mock_cols.return_value = [MagicMock(), MagicMock(), MagicMock(), MagicMock()]
+        mock_cols.side_effect = lambda n=2, **kw: [MagicMock() for _ in range(n)]
         mock_exp.return_value.__enter__ = MagicMock()
         mock_exp.return_value.__exit__ = MagicMock()
 
@@ -242,9 +271,15 @@ class TestDebugModeUIComponents(unittest.TestCase):
         tracker.set_agent_status("market", "done", "报告已生成 (500字)")
         tracker.record_agent_tool("social", "get_hot_stocks")
 
-        render_debug_monitor(tracker, default_expanded=True)
-        mock_exp.assert_called()
-        self.assertTrue(mock_md.called)
+        render_progress(tracker)
+
+        all_html = "\n".join(
+            str(c.args[0]) for c in mock_md.call_args_list if c.args
+        )
+        self.assertIn("AI 分析师实时作业矩阵", all_html)
+        self.assertIn("报告已完成", all_html)          # market 已 done 的卡片徽章
+        mock_exp.assert_called()                       # 底层遥测 expander 存在
+        mock_progress.assert_called()
 
     @patch("streamlit.columns")
     @patch("streamlit.markdown")

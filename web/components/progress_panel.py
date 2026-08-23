@@ -232,6 +232,7 @@ def render_progress(tracker: ProgressTracker) -> None:
     st.markdown(matrix_title_html, unsafe_allow_html=True)
 
     # 2-column grid for clear visibility of each agent's active sub-progress
+    _ANALYST_DESC_BY_ID = {a["id"]: a.get("desc", "") for a in ANALYST_AGENTS}
     col_left, col_right = st.columns(2)
     for idx, stage in enumerate(analyst_stages):
         aid = stage["id"]
@@ -249,7 +250,8 @@ def render_progress(tracker: ProgressTracker) -> None:
                 agent_id=aid,
                 name=stage["name"],
                 icon=stage.get("icon", "📊"),
-                desc=ANALYST_AGENTS[idx]["desc"] if idx < len(ANALYST_AGENTS) else "",
+                # 按 id 取描述：勾选子集时筛选后的下标会错位到别的分析师
+                desc=_ANALYST_DESC_BY_ID.get(aid, ""),
                 status=status,
                 detail=detail,
                 tool_calls=tool_calls,
