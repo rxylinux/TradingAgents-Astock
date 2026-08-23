@@ -12,15 +12,15 @@ DEFAULT_CONFIG = {
     # Pending entries are never pruned. None disables rotation entirely.
     "memory_log_max_entries": None,
     # LLM settings
-    "llm_provider": "openai",
-    "deep_think_llm": "gpt-5.4",
-    "quick_think_llm": "gpt-5.4-mini",
+    "llm_provider": "glm",
+    "deep_think_llm": "glm-5.1",
+    "quick_think_llm": "glm-4.7",
     # When None, each provider's client falls back to its own default endpoint
     # (api.openai.com for OpenAI, generativelanguage.googleapis.com for Gemini, ...).
     # The CLI overrides this per provider when the user picks one. Keeping a
     # provider-specific URL here would leak (e.g. OpenAI's /v1 was previously
     # being forwarded to Gemini, producing malformed request URLs).
-    "backend_url": None,
+    "backend_url": os.getenv("BACKEND_URL", "https://open.bigmodel.cn/api/coding/paas/v4"),
     # 单次回复的最大输出 token 数。None = 用 provider 自己的默认值。
     # 报告写到一半就断，通常就是撞了这个上限（不是上下文超长）——把它调大即可（#91）。
     # 走 anthropic 通道跑**第三方模型**（Kimi 等）时尤其要注意：langchain-anthropic
