@@ -78,14 +78,15 @@ def resolve_stock_name(ticker: str) -> str | None:
         return None
 
     try:
-        from tradingagents.dataflows.a_stock import _build_name_code_map
+        from tradingagents.dataflows import a_stock
 
-        _, code_to_name = _build_name_code_map()
+        code_to_name = getattr(a_stock, "_code_to_name", None)
+        if code_to_name is not None:
+            name = _clean_stock_name(code_to_name.get(code, ""))
+            return name or None
     except Exception:
-        return None
-
-    name = _clean_stock_name(code_to_name.get(code, ""))
-    return name or None
+        pass
+    return None
 
 
 def _iter_text_values(value: Any):
@@ -161,10 +162,11 @@ def _extract_stock_name_from_state(code: str, final_state: dict) -> str | None:
 def stock_display_label(ticker: str, final_state: dict | None = None) -> str:
     """Format a stock as 'code name', falling back to the code when the name is unknown."""
     code = _resolve_display_code(ticker)
-    name = resolve_stock_name(code)
-
-    if not name and final_state:
+    name = None
+    if final_state:
         name = _extract_stock_name_from_state(code, final_state)
+    if not name:
+        name = resolve_stock_name(code)
 
     if name:
         name = _clean_stock_name(name)

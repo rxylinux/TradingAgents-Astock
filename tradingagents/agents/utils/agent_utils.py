@@ -56,18 +56,62 @@ def build_instrument_context(ticker: str) -> str:
 
 def create_msg_delete():
     def delete_messages(state):
-        """Clear messages and add placeholder for Anthropic compatibility"""
-        messages = state["messages"]
+        """Pass-through clean state for parallel Fan-Out/Fan-In topology.
 
-        # Remove all messages
-        removal_operations = [RemoveMessage(id=m.id) for m in messages]
-
-        # Add a minimal placeholder message
-        placeholder = HumanMessage(content="Continue")
-
-        return {"messages": removal_operations + [placeholder]}
+        In the parallel topology, multiple analyst branches complete concurrently.
+        Returning an empty dict avoids concurrent RemoveMessage operations on the shared
+        messages channel that cause message ID deletion conflicts.
+        """
+        return {}
 
     return delete_messages
+
+
+def filter_analyst_messages(messages, tools=None, company_of_interest=""):
+    """Filter messages for an analyst in parallel Fan-Out execution.
+
+    Prevents cross-branch message collision and OpenAI BadRequestError (400)
+    when another concurrent branch's AIMessage with tool_calls has not yet received
+    its ToolMessages.
+    """
+    valid_tool_names = {t.name for t in tools} if tools else set()
+    filtered = []
+
+    # 1. First find or construct initial HumanMessage
+    human_msg = None
+    if messages:
+        for m in messages:
+            if getattr(m, "type", None) == "human" or m.__class__.__name__ == "HumanMessage":
+                human_msg = m
+                break
+    if human_msg is None:
+        human_msg = HumanMessage(content=str(company_of_interest or "Analyze"))
+    filtered.append(human_msg)
+
+    # 2. Build index of ToolMessages by tool_call_id
+    tool_msgs_by_id = {}
+    if messages:
+        for m in messages:
+            if getattr(m, "type", None) == "tool" or m.__class__.__name__ == "ToolMessage":
+                tc_id = getattr(m, "tool_call_id", None)
+                if tc_id:
+                    tool_msgs_by_id[tc_id] = m
+
+    # 3. Only keep AIMessages whose tool_calls belong to this analyst's tools
+    # AND where every tool_call_id has a corresponding ToolMessage
+    if messages:
+        for m in messages:
+            if getattr(m, "type", None) == "ai" or m.__class__.__name__ == "AIMessage":
+                tcs = getattr(m, "tool_calls", None) or []
+                if tcs:
+                    if valid_tool_names and all(tc.get("name") in valid_tool_names for tc in tcs):
+                        if all(tc.get("id") in tool_msgs_by_id for tc in tcs):
+                            filtered.append(m)
+                            for tc in tcs:
+                                filtered.append(tool_msgs_by_id[tc["id"]])
+
+    return filtered
+
 
 
         

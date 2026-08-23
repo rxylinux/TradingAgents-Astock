@@ -3,14 +3,15 @@ from typing import Annotated
 import re
 from tradingagents.dataflows.interface import route_to_vendor
 
-_A_STOCK_CODE_RE = re.compile(r"^\d{6}$")
+_A_STOCK_CODE_RE = re.compile(r"^(?:\d{6}|\d{6}\.(?:SH|SZ))$")
 
 
 def _invalid_a_stock_code_message(tool_name: str, ticker: str) -> str:
     return (
         f"Invalid ticker for `{tool_name}`: {ticker!r}. "
-        "This tool only accepts a 6-digit A-stock code, not Chinese text, "
-        "company names, sector names, concepts, or search keywords. "
+        "This tool only accepts a 6-digit A-stock code (or an index id like "
+        "'000001.SH' in index analysis), not Chinese text, company names, "
+        "sector names, concepts, or search keywords. "
         "Use the original analysis ticker/code in the tool call."
     )
 

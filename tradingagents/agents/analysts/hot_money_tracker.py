@@ -1,6 +1,7 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
+    filter_analyst_messages,
     get_concept_blocks,
     get_dragon_tiger_board,
     get_fund_flow,
@@ -93,7 +94,11 @@ def create_hot_money_tracker(llm):
         prompt = prompt.partial(instrument_context=instrument_context)
 
         chain = prompt | llm.bind_tools(tools)
-        result = chain.invoke(state["messages"])
+
+        filtered_messages = filter_analyst_messages(
+            state.get("messages", []), tools, state.get("company_of_interest", "")
+        )
+        result = chain.invoke(filtered_messages)
 
         report = ""
 

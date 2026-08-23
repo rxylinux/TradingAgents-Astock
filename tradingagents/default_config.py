@@ -78,6 +78,11 @@ DEFAULT_CONFIG = {
     # start date (default: first day of the current month → "monthly" view);
     # None keeps the previous behaviour (the model's own default, ~30). (#16)
     "market_lookback_days": None,
+    # 分析对象类型："stock"（默认，行为不变）或 "index"（市场指数，如
+    # 000001.SH 上证指数）。index 模式下：分析师集合换成指数适用预设
+    # （剔除基本面/解禁两个纯个股角色）、各 agent 使用指数版 prompt。
+    # 指数标识必须带交易所后缀（见 dataflows/index_registry.py）。
+    "instrument_type": "stock",
     # Debate and discussion settings
     "max_debate_rounds": 1,
     "max_risk_discuss_rounds": 1,

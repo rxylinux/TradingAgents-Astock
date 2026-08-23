@@ -33,17 +33,29 @@ class GraphSetup:
         tool_nodes: Dict[str, ToolNode],
         conditional_logic: ConditionalLogic,
         resolve_llm=None,
+        node_factories=None,
     ):
         """Initialize with required components.
 
         resolve_llm: 可选，`role -> llm | None` 的查表函数。返回 None 表示该角色
         没有单独配置，回落到 quick/deep 两档——不传就是完全的原行为（#39）。
+
+        node_factories: 可选，`role -> (llm) -> node_fn` 的依赖注入接缝（如指数
+        分析注入 agents/index_agents.INDEX_NODE_FACTORIES）。不传 = 完全的原行为，
+        全部节点用本文件导入的个股版工厂。只覆盖 7 个分析师与
+        bull/bear/trader/portfolio_manager；quality_gate/research_manager/
+        风险三方与标的类型无关，始终用原版。
         """
         self.quick_thinking_llm = quick_thinking_llm
         self.deep_thinking_llm = deep_thinking_llm
         self.tool_nodes = tool_nodes
         self.conditional_logic = conditional_logic
         self._resolve_llm = resolve_llm
+        self._node_factories = node_factories or {}
+
+    def _node_factory(self, role: str, default_factory):
+        """取某个角色的节点工厂：有注入用注入的，否则用原版。"""
+        return self._node_factories.get(role, default_factory)
 
     def llm_for(self, role: str) -> Any:
         """取某个角色该用的 LLM。没单独配就回落到 quick/deep 两档。"""
@@ -77,37 +89,37 @@ class GraphSetup:
         tool_nodes = {}
 
         if "market" in selected_analysts:
-            analyst_nodes["market"] = create_market_analyst(self.llm_for("market"))
+            analyst_nodes["market"] = self._node_factory("market", create_market_analyst)(self.llm_for("market"))
             delete_nodes["market"] = create_msg_delete()
             tool_nodes["market"] = self.tool_nodes["market"]
 
         if "social" in selected_analysts:
-            analyst_nodes["social"] = create_social_media_analyst(self.llm_for("social"))
+            analyst_nodes["social"] = self._node_factory("social", create_social_media_analyst)(self.llm_for("social"))
             delete_nodes["social"] = create_msg_delete()
             tool_nodes["social"] = self.tool_nodes["social"]
 
         if "news" in selected_analysts:
-            analyst_nodes["news"] = create_news_analyst(self.llm_for("news"))
+            analyst_nodes["news"] = self._node_factory("news", create_news_analyst)(self.llm_for("news"))
             delete_nodes["news"] = create_msg_delete()
             tool_nodes["news"] = self.tool_nodes["news"]
 
         if "fundamentals" in selected_analysts:
-            analyst_nodes["fundamentals"] = create_fundamentals_analyst(self.llm_for("fundamentals"))
+            analyst_nodes["fundamentals"] = self._node_factory("fundamentals", create_fundamentals_analyst)(self.llm_for("fundamentals"))
             delete_nodes["fundamentals"] = create_msg_delete()
             tool_nodes["fundamentals"] = self.tool_nodes["fundamentals"]
 
         if "policy" in selected_analysts:
-            analyst_nodes["policy"] = create_policy_analyst(self.llm_for("policy"))
+            analyst_nodes["policy"] = self._node_factory("policy", create_policy_analyst)(self.llm_for("policy"))
             delete_nodes["policy"] = create_msg_delete()
             tool_nodes["policy"] = self.tool_nodes["policy"]
 
         if "hot_money" in selected_analysts:
-            analyst_nodes["hot_money"] = create_hot_money_tracker(self.llm_for("hot_money"))
+            analyst_nodes["hot_money"] = self._node_factory("hot_money", create_hot_money_tracker)(self.llm_for("hot_money"))
             delete_nodes["hot_money"] = create_msg_delete()
             tool_nodes["hot_money"] = self.tool_nodes["hot_money"]
 
         if "lockup" in selected_analysts:
-            analyst_nodes["lockup"] = create_lockup_watcher(self.llm_for("lockup"))
+            analyst_nodes["lockup"] = self._node_factory("lockup", create_lockup_watcher)(self.llm_for("lockup"))
             delete_nodes["lockup"] = create_msg_delete()
             tool_nodes["lockup"] = self.tool_nodes["lockup"]
 
@@ -115,16 +127,16 @@ class GraphSetup:
         quality_gate_node = create_quality_gate(self.llm_for("quality_gate"))
 
         # Create researcher and manager nodes
-        bull_researcher_node = create_bull_researcher(self.llm_for("bull"))
-        bear_researcher_node = create_bear_researcher(self.llm_for("bear"))
+        bull_researcher_node = self._node_factory("bull", create_bull_researcher)(self.llm_for("bull"))
+        bear_researcher_node = self._node_factory("bear", create_bear_researcher)(self.llm_for("bear"))
         research_manager_node = create_research_manager(self.llm_for("research_manager"))
-        trader_node = create_trader(self.llm_for("trader"))
+        trader_node = self._node_factory("trader", create_trader)(self.llm_for("trader"))
 
         # Create risk analysis nodes
         aggressive_analyst = create_aggressive_debator(self.llm_for("risk_aggressive"))
         neutral_analyst = create_neutral_debator(self.llm_for("risk_neutral"))
         conservative_analyst = create_conservative_debator(self.llm_for("risk_conservative"))
-        portfolio_manager_node = create_portfolio_manager(self.llm_for("portfolio_manager"))
+        portfolio_manager_node = self._node_factory("portfolio_manager", create_portfolio_manager)(self.llm_for("portfolio_manager"))
 
         # Create workflow
         workflow = StateGraph(AgentState)
@@ -149,15 +161,13 @@ class GraphSetup:
         workflow.add_node("Portfolio Manager", portfolio_manager_node)
 
         # Define edges
-        # Start with the first analyst
-        first_analyst = selected_analysts[0]
-        workflow.add_edge(START, f"{first_analyst.capitalize()} Analyst")
-
-        # Connect analysts in sequence
-        for i, analyst_type in enumerate(selected_analysts):
+        # Connect START to each selected analyst (parallel execution)
+        for analyst_type in selected_analysts:
             current_analyst = f"{analyst_type.capitalize()} Analyst"
             current_tools = f"tools_{analyst_type}"
             current_clear = f"Msg Clear {analyst_type.capitalize()}"
+
+            workflow.add_edge(START, current_analyst)
 
             # Add conditional edges for current analyst
             workflow.add_conditional_edges(
@@ -167,12 +177,8 @@ class GraphSetup:
             )
             workflow.add_edge(current_tools, current_analyst)
 
-            # Connect to next analyst or to Bull Researcher if this is the last analyst
-            if i < len(selected_analysts) - 1:
-                next_analyst = f"{selected_analysts[i+1].capitalize()} Analyst"
-                workflow.add_edge(current_clear, next_analyst)
-            else:
-                workflow.add_edge(current_clear, "Quality Gate")
+            # Connect each Msg Clear to Quality Gate (join/fan-in)
+            workflow.add_edge(current_clear, "Quality Gate")
 
         workflow.add_edge("Quality Gate", "Bull Researcher")
 

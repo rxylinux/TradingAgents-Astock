@@ -54,7 +54,7 @@ def _get_prefix(code: str) -> str:
         return "bj"
     if code.startswith(("6", "9")):
         return "sh"
-    elif code.startswith("8"):
+    elif code.startswith(("4", "8")):
         return "bj"
     return "sz"
 
@@ -631,7 +631,7 @@ def _sina_kline_fallback(code: str, start_date: str = None, end_date: str = None
 
     Returns DataFrame with columns: Date, Open, High, Low, Close, Volume.
     """
-    prefix = "sh" if code.startswith("6") else "sz"
+    prefix = _get_prefix(code)
     url = (
         "http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
         "CN_MarketData.getKLineData"
@@ -737,10 +737,9 @@ def _supplement_stale_ohlcv_with_sina(
 # OHLCV loading with cache (mootdx -> CSV)
 # ---------------------------------------------------------------------------
 
-def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
-    """Fetch OHLCV via mootdx, cache to CSV, filter by curr_date.
+def _fetch_raw_ohlcv_astock(symbol: str, target_date: str | None = None) -> pd.DataFrame:
+    """Fetch full OHLCV via cache -> mootdx -> Sina fallback (unfiltered by date).
 
-    Mirrors stockstats_utils.load_ohlcv but uses mootdx instead of yfinance.
     Returns DataFrame with columns: Date, Open, High, Low, Close, Volume
     """
     from .config import get_config
@@ -760,12 +759,11 @@ def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
             data = pd.read_csv(cache_file, on_bad_lines="skip", encoding="utf-8")
             data = _normalize_ohlcv_dates(data)
             data, supplemented = _supplement_stale_ohlcv_with_sina(
-                code, data, curr_date, start_date=None
+                code, data, target_date, start_date=None
             )
             if supplemented:
                 data.to_csv(cache_file, index=False, encoding="utf-8")
-            cutoff = pd.to_datetime(curr_date)
-            return data[data["Date"] <= cutoff]
+            return data
 
     # Fetch from mootdx — 800 daily bars (~3 years of trading days)
     try:
@@ -799,14 +797,39 @@ def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
         except Exception:
             raise ValueError(f"No OHLCV data from mootdx/sina for {code}")
 
-    df, _ = _supplement_stale_ohlcv_with_sina(code, df, curr_date, start_date=None)
+    df, _ = _supplement_stale_ohlcv_with_sina(code, df, target_date, start_date=None)
 
     # Cache to disk
     df.to_csv(cache_file, index=False, encoding="utf-8")
+    return df
 
-    # Filter by curr_date to prevent look-ahead bias
+
+def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
+    """Fetch OHLCV via mootdx, cache to CSV, filter by curr_date.
+
+    Mirrors stockstats_utils.load_ohlcv but uses mootdx instead of yfinance.
+    Returns DataFrame with columns: Date, Open, High, Low, Close, Volume
+    """
+    df = _fetch_raw_ohlcv_astock(symbol, target_date=curr_date)
     cutoff = pd.to_datetime(curr_date)
     return df[df["Date"] <= cutoff]
+
+
+def get_astock_history_df(
+    symbol: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> pd.DataFrame:
+    """Get full daily OHLCV DataFrame for an A-stock symbol across date range."""
+    df = _fetch_raw_ohlcv_astock(symbol, target_date=end_date)
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["Date", "Open", "High", "Low", "Close", "Volume"])
+    df = df.copy()
+    if start_date:
+        df = df[df["Date"] >= pd.to_datetime(start_date)]
+    if end_date:
+        df = df[df["Date"] <= pd.to_datetime(end_date)]
+    return df.sort_values("Date").reset_index(drop=True)
 
 
 # ===========================================================================

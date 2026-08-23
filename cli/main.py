@@ -56,6 +56,9 @@ class MessageBuffer:
         "social": "Social Analyst",
         "news": "News Analyst",
         "fundamentals": "Fundamentals Analyst",
+        "policy": "Policy Analyst",
+        "hot_money": "Hot Money Tracker",
+        "lockup": "Lockup Watcher",
     }
 
     # Report section mapping: section -> (analyst_key for filtering, finalizing_agent)
@@ -66,6 +69,9 @@ class MessageBuffer:
         "sentiment_report": ("social", "Social Analyst"),
         "news_report": ("news", "News Analyst"),
         "fundamentals_report": ("fundamentals", "Fundamentals Analyst"),
+        "policy_report": ("policy", "Policy Analyst"),
+        "hot_money_report": ("hot_money", "Hot Money Tracker"),
+        "lockup_report": ("lockup", "Lockup Watcher"),
         "investment_plan": (None, "Research Manager"),
         "trader_investment_plan": (None, "Trader"),
         "final_trade_decision": (None, "Portfolio Manager"),
@@ -174,6 +180,9 @@ class MessageBuffer:
                 "sentiment_report": "Social Sentiment",
                 "news_report": "News Analysis",
                 "fundamentals_report": "Fundamentals Analysis",
+                "policy_report": "Policy Analysis",
+                "hot_money_report": "Hot Money Tracking",
+                "lockup_report": "Lockup Expiry Monitoring",
                 "investment_plan": "Research Team Decision",
                 "trader_investment_plan": "Trading Team Plan",
                 "final_trade_decision": "Portfolio Management Decision",
@@ -189,7 +198,15 @@ class MessageBuffer:
         report_parts = []
 
         # Analyst Team Reports - use .get() to handle missing sections
-        analyst_sections = ["market_report", "sentiment_report", "news_report", "fundamentals_report"]
+        analyst_sections = [
+            "market_report",
+            "sentiment_report",
+            "news_report",
+            "fundamentals_report",
+            "policy_report",
+            "hot_money_report",
+            "lockup_report",
+        ]
         if any(self.report_sections.get(section) for section in analyst_sections):
             report_parts.append("## Analyst Team Reports")
             if self.report_sections.get("market_report"):
@@ -207,6 +224,18 @@ class MessageBuffer:
             if self.report_sections.get("fundamentals_report"):
                 report_parts.append(
                     f"### Fundamentals Analysis\n{self.report_sections['fundamentals_report']}"
+                )
+            if self.report_sections.get("policy_report"):
+                report_parts.append(
+                    f"### Policy Analysis\n{self.report_sections['policy_report']}"
+                )
+            if self.report_sections.get("hot_money_report"):
+                report_parts.append(
+                    f"### Hot Money Tracking\n{self.report_sections['hot_money_report']}"
+                )
+            if self.report_sections.get("lockup_report"):
+                report_parts.append(
+                    f"### Lockup Expiry Monitoring\n{self.report_sections['lockup_report']}"
                 )
 
         # Research Team Reports
@@ -287,6 +316,9 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
             "Social Analyst",
             "News Analyst",
             "Fundamentals Analyst",
+            "Policy Analyst",
+            "Hot Money Tracker",
+            "Lockup Watcher",
         ],
         "Research Team": ["Bull Researcher", "Bear Researcher", "Research Manager"],
         "Trading Team": ["Trader"],
@@ -460,8 +492,11 @@ def update_display(layout, spinner_text=None, stats_handler=None, start_time=Non
     layout["footer"].update(Panel(stats_table, border_style="grey50"))
 
 
-def get_user_selections():
-    """Get all user selections before starting the analysis display."""
+def get_user_selections(forced_type: str | None = None):
+    """Get all user selections before starting the analysis display.
+
+    forced_type: 子命令强制指定分析类型（如 `fundflow` → "资金流向"），跳过 Step 0。
+    """
     # Display ASCII art welcome message
     with open(Path(__file__).parent / "static" / "welcome.txt", "r", encoding="utf-8") as f:
         welcome_ascii = f.read()
@@ -499,15 +534,44 @@ def get_user_selections():
             box_content += f"\n[dim]Default: {default}[/dim]"
         return Panel(box_content, border_style="blue", padding=(1, 2))
 
-    # Step 1: Ticker symbol
-    console.print(
-        create_question_box(
-            "Step 1: Ticker Symbol",
-            "Enter the exact ticker symbol to analyze, including exchange suffix when needed (examples: SPY, CNC.TO, 7203.T, 0700.HK)",
-            "SPY",
+    # Step 0: Analysis type（个股 / 指数 / 资金流向）
+    analysis_type = forced_type
+    if analysis_type is None:
+        console.print(
+            create_question_box(
+                "Step 0: Analysis Type",
+                "个股 = 6位A股代码完整分析 | 指数 = 大盘指数(上证指数/沪深300/创业板指等)完整分析"
+                " | 资金流向 = 快速大盘资金流报告(轻量)",
+                "个股",
+            )
         )
-    )
-    selected_ticker = get_ticker()
+        while True:
+            raw = typer.prompt("", default="个股")
+            if raw.strip() in ("个股", "指数", "资金流向"):
+                analysis_type = raw.strip()
+                break
+            console.print("[red]Error: 请输入 个股 / 指数 / 资金流向[/red]")
+
+    # Step 1: Ticker symbol / Index
+    if analysis_type == "个股":
+        console.print(
+            create_question_box(
+                "Step 1: Ticker Symbol",
+                "Enter the A-share ticker to analyze (6-digit code, e.g. 600519 / 300750 / 000001)",
+                "600519",
+            )
+        )
+        selected_ticker = get_ticker()
+    else:
+        console.print(
+            create_question_box(
+                "Step 1: Index",
+                "输入指数：中文名（上证指数/沪深300/创业板指/深证成指/科创50/中证500/中证1000）"
+                "或带交易所后缀代码（000001.SH / 399006.SZ）；资金流向类型可留空（默认上证指数）",
+                "上证指数",
+            )
+        )
+        selected_ticker = get_index_input(allow_empty=(analysis_type == "资金流向"))
 
     # Step 2: Analysis date
     default_date = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -539,24 +603,31 @@ def get_user_selections():
     )
     output_language = ask_output_language()
 
-    # Step 4: Select analysts
-    console.print(
-        create_question_box(
-            "Step 4: Analysts Team", "Select your LLM analyst agents for the analysis"
+    # Step 4: Select analysts（指数模式用指数预设 5 分析师，跳过选择）
+    selected_analysts = []
+    if analysis_type == "个股":
+        console.print(
+            create_question_box(
+                "Step 4: Analysts Team", "Select your LLM analyst agents for the analysis"
+            )
         )
-    )
-    selected_analysts = select_analysts()
-    console.print(
-        f"[green]Selected analysts:[/green] {', '.join(analyst.value for analyst in selected_analysts)}"
-    )
+        selected_analysts = select_analysts()
+        console.print(
+            f"[green]Selected analysts:[/green] {', '.join(analyst.value for analyst in selected_analysts)}"
+        )
+    else:
+        console.print("[green]指数模式:[/green] 分析师集合为预设（技术/情绪/新闻/政策/大盘资金流）")
 
-    # Step 5: Research depth
-    console.print(
-        create_question_box(
-            "Step 5: Research Depth", "Select your research depth level"
+    # Step 5: Research depth（资金流向报告不走辩论，跳过）
+    if analysis_type != "资金流向":
+        console.print(
+            create_question_box(
+                "Step 5: Research Depth", "Select your research depth level"
+            )
         )
-    )
-    selected_research_depth = select_research_depth()
+        selected_research_depth = select_research_depth()
+    else:
+        selected_research_depth = 1
 
     # Step 6: LLM Provider
     console.print(
@@ -608,6 +679,7 @@ def get_user_selections():
 
     return {
         "ticker": selected_ticker,
+        "analysis_type": analysis_type,
         "analysis_date": analysis_date,
         "market_lookback_days": market_lookback_days,
         "analysts": selected_analysts,
@@ -621,6 +693,22 @@ def get_user_selections():
         "anthropic_effort": anthropic_effort,
         "output_language": output_language,
     }
+
+
+def get_index_input(allow_empty: bool = False) -> str:
+    """指数输入循环：中文名 / 带后缀代码 / 指数号段裸码（实测探测）。"""
+    from tradingagents.dataflows.index_data import resolve_index_input
+
+    while True:
+        raw = typer.prompt("", default="上证指数")
+        if not raw.strip() and allow_empty:
+            return "000001.SH"
+        try:
+            spec = resolve_index_input(raw.strip())
+            console.print(f"[green]指数:[/green] {spec.name} ({spec.ticker})")
+            return spec.ticker
+        except ValueError as exc:
+            console.print(f"[red]Error: {exc}[/red]")
 
 
 def get_ticker():
@@ -706,6 +794,18 @@ def save_report_to_disk(final_state, ticker: str, save_path: Path):
         analysts_dir.mkdir(exist_ok=True)
         (analysts_dir / "fundamentals.md").write_text(final_state["fundamentals_report"], encoding="utf-8")
         analyst_parts.append(("Fundamentals Analyst", final_state["fundamentals_report"]))
+    if final_state.get("policy_report"):
+        analysts_dir.mkdir(exist_ok=True)
+        (analysts_dir / "policy.md").write_text(final_state["policy_report"], encoding="utf-8")
+        analyst_parts.append(("Policy Analyst", final_state["policy_report"]))
+    if final_state.get("hot_money_report"):
+        analysts_dir.mkdir(exist_ok=True)
+        (analysts_dir / "hot_money.md").write_text(final_state["hot_money_report"], encoding="utf-8")
+        analyst_parts.append(("Hot Money Tracker", final_state["hot_money_report"]))
+    if final_state.get("lockup_report"):
+        analysts_dir.mkdir(exist_ok=True)
+        (analysts_dir / "lockup.md").write_text(final_state["lockup_report"], encoding="utf-8")
+        analyst_parts.append(("Lockup Watcher", final_state["lockup_report"]))
     if analyst_parts:
         content = "\n\n".join(f"### {name}\n{text}" for name, text in analyst_parts)
         sections.append(f"## I. Analyst Team Reports\n\n{content}")
@@ -789,6 +889,12 @@ def display_complete_report(final_state):
         analysts.append(("News Analyst", final_state["news_report"]))
     if final_state.get("fundamentals_report"):
         analysts.append(("Fundamentals Analyst", final_state["fundamentals_report"]))
+    if final_state.get("policy_report"):
+        analysts.append(("Policy Analyst", final_state["policy_report"]))
+    if final_state.get("hot_money_report"):
+        analysts.append(("Hot Money Tracker", final_state["hot_money_report"]))
+    if final_state.get("lockup_report"):
+        analysts.append(("Lockup Watcher", final_state["lockup_report"]))
     if analysts:
         console.print(Panel("[bold]I. Analyst Team Reports[/bold]", border_style="cyan"))
         for title, content in analysts:
@@ -843,18 +949,32 @@ def update_research_team_status(status):
 
 
 # Ordered list of analysts for status transitions
-ANALYST_ORDER = ["market", "social", "news", "fundamentals"]
+ANALYST_ORDER = [
+    "market",
+    "social",
+    "news",
+    "fundamentals",
+    "policy",
+    "hot_money",
+    "lockup",
+]
 ANALYST_AGENT_NAMES = {
     "market": "Market Analyst",
     "social": "Social Analyst",
     "news": "News Analyst",
     "fundamentals": "Fundamentals Analyst",
+    "policy": "Policy Analyst",
+    "hot_money": "Hot Money Tracker",
+    "lockup": "Lockup Watcher",
 }
 ANALYST_REPORT_MAP = {
     "market": "market_report",
     "social": "sentiment_report",
     "news": "news_report",
     "fundamentals": "fundamentals_report",
+    "policy": "policy_report",
+    "hot_money": "hot_money_report",
+    "lockup": "lockup_report",
 }
 
 
@@ -974,9 +1094,32 @@ def format_tool_args(args, max_length=80) -> str:
         return result[:max_length - 3] + "..."
     return result
 
-def run_analysis(checkpoint: bool = False):
+def _run_fundflow_report(config: dict, selections: dict) -> None:
+    """生成并落盘大盘资金流报告（轻量路径，不建多 Agent 图）。"""
+    from tradingagents.market_flow import generate_market_flow_report
+
+    console.print("[bold]正在拉取市场资金数据并生成报告…[/bold] (约 10-30 秒)")
+    report = generate_market_flow_report(
+        config=config,
+        index_id=selections["ticker"],
+        curr_date=selections["analysis_date"],
+    )
+    console.print(Markdown(report))
+
+    out_dir = (
+        Path(config["results_dir"])
+        / selections["ticker"]
+        / selections["analysis_date"]
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / "fundflow_report.md"
+    out.write_text(report, encoding="utf-8")
+    console.print(f"[green]报告已保存:[/green] {out}")
+
+
+def run_analysis(checkpoint: bool = False, analysis_type: str | None = None):
     # First get all user selections
-    selections = get_user_selections()
+    selections = get_user_selections(forced_type=analysis_type)
 
     # Create config with selected research depth
     config = DEFAULT_CONFIG.copy()
@@ -993,24 +1136,43 @@ def run_analysis(checkpoint: bool = False):
     config["anthropic_effort"] = selections.get("anthropic_effort")
     config["output_language"] = selections.get("output_language", "English")
     config["checkpoint_enabled"] = checkpoint
+    config["instrument_type"] = (
+        "index" if selections.get("analysis_type") == "指数" else "stock"
+    )
+
+    # 资金流向：轻量路径，拉数据 + 1 次模型调用出报告，不走多 Agent 流水线
+    if selections.get("analysis_type") == "资金流向":
+        return _run_fundflow_report(config, selections)
 
     # Create stats callback handler for tracking LLM/tool calls
     stats_handler = StatsCallbackHandler()
 
-    # Normalize analyst selection to predefined order (selection is a 'set', order is fixed)
-    selected_set = {analyst.value for analyst in selections["analysts"]}
-    selected_analyst_keys = [a for a in ANALYST_ORDER if a in selected_set]
+    # 指数模式：换指数图（指数预设分析师 + 指数版辩论/决策 prompt）。
+    if selections.get("analysis_type") == "指数":
+        from tradingagents.graph.index_graph import TradingAgentsIndexGraph, INDEX_ANALYSTS
 
-    # Initialize the graph with callbacks bound to LLMs
-    graph = TradingAgentsGraph(
-        selected_analyst_keys,
-        config=config,
-        debug=True,
-        callbacks=[stats_handler],
-    )
+        selected_analyst_keys = list(INDEX_ANALYSTS)
+        message_buffer.init_for_analysis(selected_analyst_keys)
+        graph = TradingAgentsIndexGraph(
+            config=config,
+            debug=True,
+            callbacks=[stats_handler],
+        )
+    else:
+        # Normalize analyst selection to predefined order (selection is a 'set', order is fixed)
+        selected_set = {analyst.value for analyst in selections["analysts"]}
+        selected_analyst_keys = [a for a in ANALYST_ORDER if a in selected_set]
 
-    # Initialize message buffer with selected analysts
-    message_buffer.init_for_analysis(selected_analyst_keys)
+        # Initialize message buffer with selected analysts
+        message_buffer.init_for_analysis(selected_analyst_keys)
+
+        # Initialize the graph with callbacks bound to LLMs
+        graph = TradingAgentsGraph(
+            selected_analyst_keys,
+            config=config,
+            debug=True,
+            callbacks=[stats_handler],
+        )
 
     # Track start time for elapsed display
     start_time = time.time()
@@ -1082,8 +1244,12 @@ def run_analysis(checkpoint: bool = False):
         update_display(layout, stats_handler=stats_handler, start_time=start_time)
 
         # Update agent status to in_progress for the first analyst
-        first_analyst = f"{selections['analysts'][0].value.capitalize()} Analyst"
-        message_buffer.update_agent_status(first_analyst, "in_progress")
+        if selected_analyst_keys:
+            first_analyst = MessageBuffer.ANALYST_MAPPING.get(
+                selected_analyst_keys[0],
+                f"{selected_analyst_keys[0].capitalize()} Analyst",
+            )
+            message_buffer.update_agent_status(first_analyst, "in_progress")
         update_display(layout, stats_handler=stats_handler, start_time=start_time)
 
         # Create spinner text
@@ -1304,6 +1470,17 @@ def analyze(
         n = clear_all_checkpoints(DEFAULT_CONFIG["data_cache_dir"])
         console.print(f"[yellow]Cleared {n} checkpoint(s).[/yellow]")
     run_analysis(checkpoint=checkpoint)
+
+
+@app.command()
+def fundflow():
+    """快速大盘资金流报告（轻量：拉数据 + 1 次模型调用，不走完整流水线）。
+
+    向导会询问指数（默认上证指数）、日期与模型配置。
+    ⚠️ 加子命令不得破坏裸跑 `tradingagents` 的默认分析路径
+    （tests/test_cli_default_command.py 锁住这一点）。
+    """
+    run_analysis(analysis_type="资金流向")
 
 
 @app.command()

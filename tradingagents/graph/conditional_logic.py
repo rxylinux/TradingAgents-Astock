@@ -13,57 +13,71 @@ class ConditionalLogic:
 
     def should_continue_market(self, state: AgentState):
         """Determine if market analysis should continue."""
-        messages = state["messages"]
+        messages = state.get("messages", [])
+        if not messages:
+            return "Msg Clear Market"
         last_message = messages[-1]
-        if last_message.tool_calls:
+        if getattr(last_message, "tool_calls", None):
             return "tools_market"
         return "Msg Clear Market"
 
     def should_continue_social(self, state: AgentState):
         """Determine if social media analysis should continue."""
-        messages = state["messages"]
+        messages = state.get("messages", [])
+        if not messages:
+            return "Msg Clear Social"
         last_message = messages[-1]
-        if last_message.tool_calls:
+        if getattr(last_message, "tool_calls", None):
             return "tools_social"
         return "Msg Clear Social"
 
     def should_continue_news(self, state: AgentState):
         """Determine if news analysis should continue."""
-        messages = state["messages"]
+        messages = state.get("messages", [])
+        if not messages:
+            return "Msg Clear News"
         last_message = messages[-1]
-        if last_message.tool_calls:
+        if getattr(last_message, "tool_calls", None):
             return "tools_news"
         return "Msg Clear News"
 
     def should_continue_fundamentals(self, state: AgentState):
         """Determine if fundamentals analysis should continue."""
-        messages = state["messages"]
+        messages = state.get("messages", [])
+        if not messages:
+            return "Msg Clear Fundamentals"
         last_message = messages[-1]
-        if last_message.tool_calls:
+        if getattr(last_message, "tool_calls", None):
             return "tools_fundamentals"
         return "Msg Clear Fundamentals"
 
     def should_continue_policy(self, state: AgentState):
         """Determine if policy analysis should continue."""
-        messages = state["messages"]
+        messages = state.get("messages", [])
+        if not messages:
+            return "Msg Clear Policy"
         last_message = messages[-1]
-        if last_message.tool_calls:
+        if getattr(last_message, "tool_calls", None):
             return "tools_policy"
         return "Msg Clear Policy"
 
     def should_continue_hot_money(self, state: AgentState):
         """Determine if hot money tracking should continue."""
-        messages = state["messages"]
+        messages = state.get("messages", [])
+        if not messages:
+            return "Msg Clear Hot_money"
         last_message = messages[-1]
-        if last_message.tool_calls:
+        if getattr(last_message, "tool_calls", None):
             return "tools_hot_money"
         return "Msg Clear Hot_money"
 
     def should_continue_lockup(self, state: AgentState):
         """Determine if lockup/reduction analysis should continue."""
-        messages = state["messages"]
+        messages = state.get("messages", [])
+        if not messages:
+            return "Msg Clear Lockup"
         last_message = messages[-1]
-        if last_message.tool_calls:
+        if getattr(last_message, "tool_calls", None):
             return "tools_lockup"
         return "Msg Clear Lockup"
 

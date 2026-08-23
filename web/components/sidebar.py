@@ -36,12 +36,23 @@ _PROVIDER_DISPLAY = [name for name, _ in _PROVIDERS]
 _PROVIDER_KEYS = [key for _, key in _PROVIDERS]
 
 
-def _resolve_user_input(raw: str) -> tuple[str, str | None]:
+def _resolve_user_input(raw: str, analysis_type: str = "个股") -> tuple[str, str | None]:
     """Resolve raw user input to (ticker_code, error_msg).
 
-    Accepts 6-digit codes or Chinese stock names (e.g. '宝光股份').
-    Returns (code, None) on success or ("", error_msg) on failure.
+    个股: 6-digit codes or Chinese stock names（原行为不变）
+    指数: 中文名 / 带交易所后缀代码（000001.SH）/ 指数号段裸码（实测探测）
+    资金流向: 同指数，留空默认上证指数
     """
+    if analysis_type in ("指数", "资金流向"):
+        from tradingagents.dataflows.index_data import resolve_index_input
+
+        if not raw.strip() and analysis_type == "资金流向":
+            return "000001.SH", None  # 资金流报告默认看上证指数
+        try:
+            return resolve_index_input(raw).ticker, None
+        except ValueError as e:
+            return "", str(e)
+
     from tradingagents.dataflows.a_stock import resolve_ticker
 
     try:
@@ -140,6 +151,7 @@ def _render_llm_config() -> None:
         range(len(_PROVIDERS)),
         format_func=lambda i: _PROVIDER_DISPLAY[i],
         key="llm_provider_idx",
+        index=_PROVIDER_KEYS.index("deepseek"),
         help="选择你配置了 API Key 的供应商",
     )
     provider_key = _PROVIDER_KEYS[provider_idx]
@@ -250,12 +262,12 @@ def render_sidebar() -> None:
     st.markdown(
         """
         <div style="text-align:center; margin-bottom:1.5rem;">
-            <span style="font-size:2rem; font-weight:800; color:#ff5a1f;">Trading</span><span style="font-size:2rem; font-weight:800; color:#f5f1eb;">Agents</span><span style="font-size:2rem; font-weight:800; color:#f5f1eb;">-</span><span style="font-size:2rem; font-weight:800; color:#ff5a1f;">Astock</span>
-            <div style="font-size:0.85rem; color:#888; margin-top:0.2rem;">
+            <span style="font-size:2rem; font-weight:800; color:#ff5a1f;">Trading</span><span style="font-size:2rem; font-weight:800; color:#0f172a;">Agents</span><span style="font-size:2rem; font-weight:800; color:#0f172a;">-</span><span style="font-size:2rem; font-weight:800; color:#ff5a1f;">Astock</span>
+            <div style="font-size:0.85rem; color:#475569; margin-top:0.2rem; font-weight:500;">
                 A股多Agent投研系统
             </div>
-            <div style="font-size:0.7rem; color:#555; margin-top:0.3rem;">
-                by <a href="https://github.com/simonlin1212" style="color:#ff5a1f; text-decoration:none;">simonlin1212</a>
+            <div style="font-size:0.75rem; color:#94a3b8; margin-top:0.3rem;">
+                by <a href="https://github.com/simonlin1212" style="color:#ff5a1f; text-decoration:none; font-weight:600;">simonlin1212</a>
             </div>
         </div>
         """,
@@ -265,11 +277,35 @@ def render_sidebar() -> None:
     st.markdown("---")
     st.markdown("#### 新建分析")
 
+    analysis_type = st.selectbox(
+        "分析类型",
+        ["个股", "指数", "资金流向"],
+        key="analysis_type",
+        help=(
+            "个股=6位代码完整多Agent分析；指数=大盘指数（上证指数/沪深300/创业板指"
+            "等）完整分析；资金流向=轻量快速的大盘资金流报告（1次模型调用）"
+        ),
+    )
+
+    if analysis_type == "指数":
+        ticker_help = (
+            "支持：指数中文名（上证指数/沪深300/创业板指/深证成指/科创50/中证500/"
+            "中证1000）、带交易所后缀代码（000001.SH / 399006.SZ）、或指数号段 6 位"
+            "代码（000/880/999/399 开头，自动探测校验）"
+        )
+        ticker_placeholder = "例: 000001.SH 或 上证指数"
+    elif analysis_type == "资金流向":
+        ticker_help = "可选：默认上证指数。支持中文名或 000001.SH 形式"
+        ticker_placeholder = "默认 上证指数，可填其他指数"
+    else:
+        ticker_help = "输入6位A股代码或中文股票全称"
+        ticker_placeholder = "例: 300750 或 宁德时代"
+
     ticker = st.text_input(
         "股票代码",
-        placeholder="例: 300750 或 宁德时代",
+        placeholder=ticker_placeholder,
         key="input_ticker",
-        help="输入6位A股代码或中文股票全称",
+        help=ticker_help,
     )
 
     trade_date = st.date_input(
@@ -287,32 +323,74 @@ def render_sidebar() -> None:
     )
     # 分析窗口天数 → market_lookback_days（下限 5 天，保证指标有意义）
     st.session_state["market_lookback_days"] = max((trade_date - start_date).days, 5)
-    if start_date >= trade_date:
-        st.caption("⚠️ 起始日期应早于分析日期，已按最小窗口（5 天）处理。")
+    _ALL_ANALYSTS = [
+        ("market", "📊 技术分析师", "量价异动、均线趋势、MACD/K线形态"),
+        ("social", "💬 情绪分析师", "股吧/雪球讨论热度、散户情绪"),
+        ("news", "📰 新闻分析师", "个股公告、行业动态、财经快讯"),
+        ("fundamentals", "📋 基本面分析师", "财报三表、PE/PB估值、盈利预测"),
+        ("policy", "🏛️ 政策分析师", "宏观政策、产业扶持、监管新规"),
+        ("hot_money", "🔥 游资追踪师", "主力资金流向、龙虎榜席位、北向资金"),
+        ("lockup", "🔒 解禁监控师", "限售股解禁日历、大股东减持预警"),
+    ]
+
+    with st.expander("👥 分析师团队配置 (7位)", expanded=False):
+        st.caption("勾选参与本轮分析的 AI 分析师角色：")
+        selected_analysts = []
+        for key, name, desc in _ALL_ANALYSTS:
+            # 指数模式下基本面与解禁不适用
+            default_val = not (analysis_type == "指数" and key in ("fundamentals", "lockup"))
+            if st.checkbox(
+                f"{name}",
+                value=default_val,
+                key=f"sidebar_analyst_{key}",
+                help=desc,
+            ):
+                selected_analysts.append(key)
+        if not selected_analysts:
+            st.warning("⚠️ 请至少选择 1 位分析师，已自动勾选技术分析师。")
+            selected_analysts = ["market"]
+        st.session_state["selected_analysts"] = selected_analysts
 
     with st.expander("⚙️ 模型配置", expanded=False):
         _render_llm_config()
+
+    st.toggle(
+        "🐞 调试模式 (Agent状态监控)",
+        key="debug_mode",
+        value=st.session_state.get("debug_mode", False),
+        help="开启后在运行中及完成后实时展示 7 位 Agent 各自的执行状态、工具调用明细与中间数据",
+    )
 
     tracker = st.session_state.get("tracker")
     is_busy = tracker is not None and tracker.is_running
     is_stopping = is_busy and tracker.stop_requested
 
+    if analysis_type == "资金流向":
+        button_label = "生成资金流报告"
+    elif is_stopping:
+        button_label = "停止中..."
+    elif is_busy:
+        button_label = "分析进行中..."
+    else:
+        button_label = "开始分析"
+
     if st.button(
-        "开始分析" if not is_busy else "停止中..." if is_stopping else "分析进行中...",
+        button_label,
         use_container_width=True,
-        disabled=is_busy or not ticker,
+        disabled=is_busy or (not ticker and analysis_type != "资金流向"),
         type="primary",
     ):
-        resolved_code, err = _resolve_user_input(ticker)
+        resolved_code, err = _resolve_user_input(ticker, analysis_type)
         if err:
             st.error(f"❌ {err}")
         else:
             if resolved_code != ticker.strip():
-                st.success(f"✅ {ticker.strip()} → {resolved_code}")
+                st.success(f"✅ {ticker.strip() or '(默认)'} → {resolved_code}")
             st.session_state["start_analysis"] = {
                 "ticker": resolved_code,
                 "trade_date": trade_date.strftime("%Y-%m-%d"),
                 "fresh": True,
+                "analysis_type": analysis_type,
             }
             st.session_state["viewing_history"] = None
 
@@ -341,9 +419,13 @@ def render_sidebar() -> None:
                 use_container_width=True,
                 disabled=is_busy,
             ):
+                # 从断点续跑：带 .SH/.SZ 后缀的是指数任务，恢复为指数模式
+                from tradingagents.dataflows.index_registry import parse_index_ticker
+
                 st.session_state["start_analysis"] = {
                     "ticker": t,
                     "trade_date": d,
+                    "analysis_type": "指数" if parse_index_ticker(t) else "个股",
                 }
                 st.session_state["viewing_history"] = None
 

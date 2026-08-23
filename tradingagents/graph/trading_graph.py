@@ -7,6 +7,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Dict, Any, Tuple, List, Optional
 
+import pandas as pd
 import yfinance as yf
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,22 @@ _PROVIDER_SPECIFIC_KWARGS = frozenset({
 })
 
 
+def _extract_a_stock_code(ticker: str) -> Optional[str]:
+    """Extract pure 6-digit code if ticker is A-share, else None."""
+    s = str(ticker).strip().upper()
+    for suffix in (".SH", ".SZ", ".BJ", ".SS"):
+        if s.endswith(suffix):
+            s = s[:-len(suffix)]
+            break
+    for prefix in ("SH", "SZ", "BJ"):
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+            break
+    if len(s) == 6 and s.isdigit():
+        return s
+    return None
+
+
 def _normalize_yfinance_ticker(ticker: str) -> str:
     """Return the Yahoo Finance symbol for a ticker used by the graph.
 
@@ -87,10 +104,10 @@ def _normalize_yfinance_ticker(ticker: str) -> str:
     if (
         len(symbol) == 9
         and symbol[:6].isdigit()
-        and symbol[6:] in (".SH", ".SZ", ".BJ")
+        and symbol[6:] in (".SH", ".SZ", ".BJ", ".SS")
     ):
         code, exchange = symbol[:6], symbol[7:]
-        if exchange == "SH":
+        if exchange in ("SH", "SS"):
             return f"{code}.SS"
         if exchange == "SZ":
             return f"{code}.SZ"
@@ -135,7 +152,7 @@ def _is_unsupported_by_yfinance(symbol: str) -> bool:
     return (
         len(symbol) == 6
         and symbol.isdigit()
-        and (symbol.startswith("92") or symbol[:2] in ("43", "83", "87"))
+        and (symbol.startswith("92") or symbol[:2] in ("43", "83", "87") or symbol.startswith(("4", "8")))
     )
 
 
@@ -485,9 +502,19 @@ class TradingAgentsGraph:
         }
 
     def _fetch_returns(
-        self, ticker: str, trade_date: str, holding_days: int = 5
+        self,
+        ticker: str,
+        trade_date: str,
+        holding_days: int = 5,
+        benchmark_ticker: str = "000300.SH",
     ) -> Tuple[Optional[float], Optional[float], Optional[int]]:
         """Fetch raw and alpha return for ticker over holding_days from trade_date.
+
+        For A-share stocks (6-digit numeric or with SH/SZ/BJ/SS prefix/suffix,
+        including Beijing Stock Exchange 920xxx / 83xxxx / 43xxxx) and market indices,
+        prioritizes the native A-share data pipeline (mootdx / Sina history) to calculate
+        stock/index and CSI 300 benchmark returns. Yahoo Finance is retained as a fallback
+        for non-A-share symbols or if native data is unavailable.
 
         Returns (raw_return, alpha_return, actual_holding_days) or
         (None, None, None) if price data is unavailable (too recent, delisted,
@@ -498,24 +525,64 @@ class TradingAgentsGraph:
             end = start + timedelta(days=holding_days + 7)  # buffer for weekends/holidays
             end_str = end.strftime("%Y-%m-%d")
 
+            # 1. Check if target is an index or A-share stock, and try native data pipeline first
+            from tradingagents.dataflows.index_registry import is_index_symbol
+
+            is_index = is_index_symbol(ticker)
+            code = None if is_index else _extract_a_stock_code(ticker)
+
+            if is_index or code is not None:
+                try:
+                    from tradingagents.dataflows.a_stock import get_astock_history_df
+                    from tradingagents.dataflows.index_data import get_index_history_df
+
+                    if is_index:
+                        stock_df = get_index_history_df(ticker, start_date=trade_date, end_date=end_str)
+                    else:
+                        stock_df = get_astock_history_df(code, start_date=trade_date, end_date=end_str)
+
+                    bench_df = get_index_history_df(benchmark_ticker, start_date=trade_date, end_date=end_str)
+
+                    if stock_df is not None and not stock_df.empty and bench_df is not None and not bench_df.empty:
+                        stock_df = stock_df[stock_df["Date"] >= pd.to_datetime(trade_date)].sort_values("Date").reset_index(drop=True)
+                        bench_df = bench_df[bench_df["Date"] >= pd.to_datetime(trade_date)].sort_values("Date").reset_index(drop=True)
+
+                        if len(stock_df) >= 2 and len(bench_df) >= 2:
+                            actual_days = min(holding_days, len(stock_df) - 1, len(bench_df) - 1)
+                            if actual_days >= 1:
+                                raw = float(
+                                    (stock_df["Close"].iloc[actual_days] - stock_df["Close"].iloc[0])
+                                    / stock_df["Close"].iloc[0]
+                                )
+                                bench_ret = float(
+                                    (bench_df["Close"].iloc[actual_days] - bench_df["Close"].iloc[0])
+                                    / bench_df["Close"].iloc[0]
+                                )
+                                alpha = raw - bench_ret
+                                return raw, alpha, actual_days
+                except Exception as e:
+                    logger.debug("Native return fetch failed for %s: %s", ticker, e)
+
+            # 2. Fallback to Yahoo Finance (for non-A shares or when native pipeline is unavailable)
             yf_symbol = _normalize_yfinance_ticker(ticker)
             if _is_unsupported_by_yfinance(yf_symbol):
-                # Say why instead of leaving a silent forever-pending entry.
-                logger.warning(
-                    "Cannot resolve outcome for %s: Yahoo Finance has no Beijing "
-                    "Stock Exchange coverage under any suffix, so this entry stays "
-                    "pending. Use a non-BSE ticker if you need memory reflection.",
-                    ticker,
-                )
+                # Beijing Stock Exchange has no Yahoo Finance coverage under any suffix
                 return None, None, None
 
+            yf_bench = _normalize_yfinance_ticker(benchmark_ticker)
+            if _is_unsupported_by_yfinance(yf_bench):
+                yf_bench = "000300.SS"
+
             stock = yf.Ticker(yf_symbol).history(start=trade_date, end=end_str)
-            benchmark = yf.Ticker("000300.SS").history(start=trade_date, end=end_str)
+            benchmark = yf.Ticker(yf_bench).history(start=trade_date, end=end_str)
 
             if len(stock) < 2 or len(benchmark) < 2:
                 return None, None, None
 
             actual_days = min(holding_days, len(stock) - 1, len(benchmark) - 1)
+            if actual_days < 1:
+                return None, None, None
+
             raw = float(
                 (stock["Close"].iloc[actual_days] - stock["Close"].iloc[0])
                 / stock["Close"].iloc[0]

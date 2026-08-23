@@ -10,7 +10,9 @@ from tradingagents.graph.reflection import Reflector
 from tradingagents.graph.trading_graph import (
     TradingAgentsGraph,
     _normalize_yfinance_ticker,
+    _extract_a_stock_code,
 )
+from tradingagents.graph.index_graph import TradingAgentsIndexGraph
 from tradingagents.graph.propagation import Propagator
 from tradingagents.agents.managers.portfolio_manager import create_portfolio_manager
 
@@ -59,6 +61,19 @@ def _resolve_entry(log, ticker, date, decision, reflection="Good call."):
 def _price_df(prices):
     """Minimal DataFrame matching yfinance .history() output shape."""
     return pd.DataFrame({"Close": prices})
+
+
+def _native_kline_df(prices, start_date="2026-01-05"):
+    """Minimal DataFrame matching native A-stock / index get_history_df output shape."""
+    dates = pd.date_range(start=start_date, periods=len(prices), freq="D")
+    return pd.DataFrame({
+        "Date": dates,
+        "Open": prices,
+        "High": prices,
+        "Low": prices,
+        "Close": prices,
+        "Volume": [1000] * len(prices),
+    })
 
 
 def _make_pm_state(past_context=""):
@@ -407,6 +422,27 @@ class TestDeferredReflection:
         assert _normalize_yfinance_ticker("BJ830799") == "830799"
         assert _normalize_yfinance_ticker("830799.BJ") == "830799"
 
+    def test_extract_a_stock_code(self):
+        assert _extract_a_stock_code("600519") == "600519"
+        assert _extract_a_stock_code("688017") == "688017"
+        assert _extract_a_stock_code("000001") == "000001"
+        assert _extract_a_stock_code("300750") == "300750"
+        assert _extract_a_stock_code("830799") == "830799"
+        assert _extract_a_stock_code("920002") == "920002"
+        assert _extract_a_stock_code("430047") == "430047"
+        assert _extract_a_stock_code("600519.SH") == "600519"
+        assert _extract_a_stock_code("600519.SS") == "600519"
+        assert _extract_a_stock_code("SH600519") == "600519"
+        assert _extract_a_stock_code("000001.SZ") == "000001"
+        assert _extract_a_stock_code("SZ000001") == "000001"
+        assert _extract_a_stock_code("830799.BJ") == "830799"
+        assert _extract_a_stock_code("BJ830799") == "830799"
+        assert _extract_a_stock_code("NVDA") is None
+        assert _extract_a_stock_code("AAPL") is None
+        assert _extract_a_stock_code("00700.HK") is None
+        assert _extract_a_stock_code("XXXXXFAKE") is None
+        assert _extract_a_stock_code("12345") is None
+
     # update_with_outcome
 
     def test_update_replaces_pending_tag(self, tmp_path):
@@ -507,30 +543,59 @@ class TestDeferredReflection:
 
     # TradingAgentsGraph._fetch_returns
 
-    def test_fetch_returns_valid_ticker(self):
+    def test_fetch_returns_valid_astock_native(self):
         stock_prices = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
         bench_prices = [4000.0, 4020.0, 4040.0, 4030.0, 4050.0, 4060.0]
         mock_graph = MagicMock(spec=TradingAgentsGraph)
-        with patch("yfinance.Ticker") as mock_ticker_cls:
+        with patch("tradingagents.dataflows.a_stock.get_astock_history_df", return_value=_native_kline_df(stock_prices)), \
+             patch("tradingagents.dataflows.index_data.get_index_history_df", return_value=_native_kline_df(bench_prices)), \
+             patch("yfinance.Ticker") as mock_yf:
+            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "688017", "2026-01-05")
+            mock_yf.assert_not_called()
+        assert raw is not None and alpha is not None and days is not None
+        assert isinstance(raw, float) and isinstance(alpha, float) and isinstance(days, int)
+        assert days == 5
+        assert round(raw, 4) == 0.06
+        assert round(bench_prices[-1] / bench_prices[0] - 1, 4) == 0.015
+        assert round(alpha, 4) == round(0.06 - 0.015, 4)
+
+    def test_fetch_returns_beijing_stock_exchange_supported(self):
+        """Beijing Stock Exchange stocks (920xxx, 83xxxx, 43xxxx, etc.) resolve via native pipeline."""
+        stock_prices = [10.0, 10.5, 11.0, 11.5, 12.0, 12.5]
+        bench_prices = [4000.0, 4020.0, 4040.0, 4030.0, 4050.0, 4060.0]
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        with patch("tradingagents.dataflows.a_stock.get_astock_history_df", return_value=_native_kline_df(stock_prices)), \
+             patch("tradingagents.dataflows.index_data.get_index_history_df", return_value=_native_kline_df(bench_prices)):
+            for bse_ticker in ("920002", "830799", "430047", "830799.BJ", "BJ920002"):
+                raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, bse_ticker, "2026-01-05")
+                assert raw is not None, f"BSE ticker {bse_ticker} must resolve outcome"
+                assert days == 5
+                assert round(raw, 4) == 0.25
+
+    def test_fetch_returns_bse_returns_none_when_no_native_data(self):
+        """BSE stocks return (None, None, None) safely if native data is unavailable."""
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        with patch("tradingagents.dataflows.a_stock.get_astock_history_df", return_value=pd.DataFrame()), \
+             patch("tradingagents.dataflows.index_data.get_index_history_df", return_value=pd.DataFrame()):
+            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "920002", "2026-01-05")
+            assert raw is None and alpha is None and days is None
+
+    def test_fetch_returns_uses_exchange_qualified_astock_symbol_on_yfinance_fallback(self):
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        bench_prices = [4000.0, 4020.0, 4040.0, 4030.0, 4050.0, 4060.0]
+        stock_prices = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0]
+        with patch("tradingagents.dataflows.a_stock.get_astock_history_df", return_value=pd.DataFrame()), \
+             patch("tradingagents.dataflows.index_data.get_index_history_df", return_value=pd.DataFrame()), \
+             patch("yfinance.Ticker") as mock_ticker_cls:
             def _make_ticker(sym):
                 m = MagicMock()
                 m.history.return_value = _price_df(bench_prices if sym == "000300.SS" else stock_prices)
                 return m
             mock_ticker_cls.side_effect = _make_ticker
-            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "688017", "2026-01-05")
-        assert raw is not None and alpha is not None and days is not None
-        assert isinstance(raw, float) and isinstance(alpha, float) and isinstance(days, int)
-        assert days == 5
-
-    def test_fetch_returns_uses_exchange_qualified_astock_symbol(self):
-        mock_graph = MagicMock(spec=TradingAgentsGraph)
-        with patch("yfinance.Ticker") as mock_ticker_cls:
-            m = MagicMock()
-            m.history.return_value = _price_df([100.0, 101.0, 102.0, 103.0, 104.0, 105.0])
-            mock_ticker_cls.return_value = m
-            TradingAgentsGraph._fetch_returns(mock_graph, "600519", "2026-01-05")
+            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "600519", "2026-01-05")
 
         assert mock_ticker_cls.call_args_list[0].args == ("600519.SS",)
+        assert raw is not None and alpha is not None and days == 5
 
     def test_fetch_returns_too_recent(self):
         """Only 1 data point available → returns (None, None, None), no crash."""
@@ -557,15 +622,45 @@ class TestDeferredReflection:
         stock_prices = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
         bench_prices = [4000.0, 4020.0, 4030.0]
         mock_graph = MagicMock(spec=TradingAgentsGraph)
-        with patch("yfinance.Ticker") as mock_ticker_cls:
-            def _make_ticker(sym):
-                m = MagicMock()
-                m.history.return_value = _price_df(bench_prices if sym == "000300.SS" else stock_prices)
-                return m
-            mock_ticker_cls.side_effect = _make_ticker
+        with patch("tradingagents.dataflows.a_stock.get_astock_history_df", return_value=_native_kline_df(stock_prices)), \
+             patch("tradingagents.dataflows.index_data.get_index_history_df", return_value=_native_kline_df(bench_prices)):
             raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "688017", "2026-01-05")
         assert raw is not None and alpha is not None and days is not None
         assert days == 2
+
+    def test_fetch_returns_index_graph_switches_benchmark_for_csi300(self):
+        """Index graph analyzing 000300.SH uses 000001.SH as benchmark."""
+        index_prices = [4000.0, 4020.0, 4040.0, 4030.0, 4050.0, 4060.0]
+        sse_prices = [3200.0, 3210.0, 3220.0, 3215.0, 3225.0, 3230.0]
+        mock_index_graph = MagicMock(spec=TradingAgentsIndexGraph)
+
+        def mock_get_index(ticker, **kwargs):
+            if "000001" in str(ticker):
+                return _native_kline_df(sse_prices)
+            return _native_kline_df(index_prices)
+
+        with patch("tradingagents.dataflows.index_data.get_index_history_df", side_effect=mock_get_index):
+            raw, alpha, days = TradingAgentsIndexGraph._fetch_returns(mock_index_graph, "000300.SH", "2026-01-05")
+        assert raw is not None and alpha is not None and days == 5
+        assert round(raw, 4) == 0.015
+        assert round(alpha, 4) == round(0.015 - (3230.0 / 3200.0 - 1), 4)
+
+    def test_fetch_returns_index_graph_uses_csi300_for_other_indices(self):
+        """Index graph analyzing other indices (399006.SZ) uses 000300.SH as benchmark."""
+        chinext_prices = [2000.0, 2020.0, 2040.0, 2030.0, 2050.0, 2060.0]
+        csi300_prices = [4000.0, 4010.0, 4020.0, 4015.0, 4025.0, 4030.0]
+        mock_index_graph = MagicMock(spec=TradingAgentsIndexGraph)
+
+        def mock_get_index(ticker, **kwargs):
+            if "000300" in str(ticker):
+                return _native_kline_df(csi300_prices)
+            return _native_kline_df(chinext_prices)
+
+        with patch("tradingagents.dataflows.index_data.get_index_history_df", side_effect=mock_get_index):
+            raw, alpha, days = TradingAgentsIndexGraph._fetch_returns(mock_index_graph, "399006.SZ", "2026-01-05")
+        assert raw is not None and alpha is not None and days == 5
+        assert round(raw, 4) == 0.03
+        assert round(alpha, 4) == round(0.03 - (4030.0 / 4000.0 - 1), 4)
 
     # TradingAgentsGraph._resolve_pending_entries
 

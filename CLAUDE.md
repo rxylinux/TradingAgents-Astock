@@ -6,7 +6,7 @@
 - **仓库**: https://github.com/simonlin1212/TradingAgents-astock
 - **协议**: Apache 2.0
 - **Python**: >=3.10
-- **当前版本**: 0.5.14（2026-08-09 发布，经 codex 九轮审计）
+- **当前版本**: 0.6.0（2026-08-16 发布，新增大盘指数分析 + 资金流向分析）
   ⚠️ 改版本号时**三处要一起改**：`pyproject.toml` / `CHANGELOG.md` / 这一行。漏了这行会让后续 agent 和发版流程读到旧版本（`tests/test_version_consistency.py` 会拦）。
 
 ## 架构
@@ -99,7 +99,7 @@ deepseek-v4-flash 等模型在 tool call 时可能返回中文股票名而非 6 
 
 ### 测试
 **干净 clone（`pip install -e .` 不带 `[agentsdk]`）跑 `pytest tests/` 应当是
-361 passed / 13 skipped / **0 failed**。出现 failed 就是真回归。**
+439 passed / 14 skipped / **0 failed**。出现 failed 就是真回归。**
 需要可选依赖的用例用 `requires_sdk` 标记跳过——⚠️ **占位类型绝不要用 `Exception`
 基类**：`ClaudeSDKError` 曾被占位成 `Exception`，进 `_FALLBACK_ERRORS` 后让"订阅凭据
 失效不得降级到计费 provider"这条护栏彻底失效（v0.5.4 修）。

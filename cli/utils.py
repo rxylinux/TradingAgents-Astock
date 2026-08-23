@@ -10,12 +10,16 @@ console = Console()
 
 TICKER_INPUT_EXAMPLES = "Examples: SPY, CNC.TO, 7203.T, 0700.HK"
 
-ANALYST_ORDER = [
+ANALYST_CHOICES = [
     ("Market Analyst", AnalystType.MARKET),
     ("Social Media Analyst", AnalystType.SOCIAL),
     ("News Analyst", AnalystType.NEWS),
     ("Fundamentals Analyst", AnalystType.FUNDAMENTALS),
+    ("Policy Analyst (政策分析师)", AnalystType.POLICY),
+    ("Hot Money Tracker (游资追踪师)", AnalystType.HOT_MONEY),
+    ("Lockup Watcher (解禁监控师)", AnalystType.LOCKUP),
 ]
+ANALYST_ORDER = ANALYST_CHOICES
 
 
 def get_ticker() -> str:
@@ -91,7 +95,8 @@ def select_analysts() -> List[AnalystType]:
     choices = questionary.checkbox(
         "Select Your [Analysts Team]:",
         choices=[
-            questionary.Choice(display, value=value) for display, value in ANALYST_ORDER
+            questionary.Choice(display, value=value, checked=True)
+            for display, value in ANALYST_CHOICES
         ],
         instruction="\n- Press Space to select/unselect analysts\n- Press 'a' to select/unselect all\n- Press Enter when done",
         validate=lambda x: len(x) > 0 or "You must select at least one analyst.",

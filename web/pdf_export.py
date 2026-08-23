@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,7 @@ _PDF_FONT_ENV = "TRADINGAGENTS_PDF_FONT"
 _PDF_BOLD_FONT_ENV = "TRADINGAGENTS_PDF_BOLD_FONT"
 
 _FONT_CANDIDATES = [
+    # Linux standard packages (WQY / Noto / Droid)
     (
         "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
         "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
@@ -67,14 +69,20 @@ _FONT_CANDIDATES = [
         "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
         "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
     ),
+    # macOS fast CJK fonts (avoids slow/huge system TTCs like PingFang.ttc/STHeiti.ttc)
     (
-        "/System/Library/Fonts/PingFang.ttc",
-        "/System/Library/Fonts/PingFang.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+        "/Library/Fonts/Arial Unicode.ttf",
     ),
     (
-        "/System/Library/Fonts/STHeiti Light.ttc",
-        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     ),
+    (
+        "/System/Library/Fonts/Supplemental/Songti.ttc",
+        "/System/Library/Fonts/Supplemental/Songti.ttc",
+    ),
+    # Windows standard CJK fonts
     (
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/msyhbd.ttc",
@@ -83,7 +91,37 @@ _FONT_CANDIDATES = [
         "C:/Windows/Fonts/simhei.ttf",
         "C:/Windows/Fonts/simhei.ttf",
     ),
+    (
+        "C:/Windows/Fonts/simsun.ttc",
+        "C:/Windows/Fonts/simsun.ttc",
+    ),
+    (
+        "C:/Windows/Fonts/kaiti.ttf",
+        "C:/Windows/Fonts/kaiti.ttf",
+    ),
 ]
+
+_BLOCKED_FONT_NAMES = {
+    "PingFang.ttc",
+    "PingFang.otf",
+    "STHeiti Light.ttc",
+    "STHeiti Medium.ttc",
+    "STHeiti.ttc",
+    "STHeiti.otf",
+}
+
+_BLOCKED_FONT_KEYWORDS = (
+    "pingfang",
+    "stheiti",
+    "hiragino",
+)
+
+
+def _is_blocked_font(path: Path | str) -> bool:
+    name_lower = Path(path).name.lower()
+    if Path(path).name in _BLOCKED_FONT_NAMES:
+        return True
+    return any(keyword in name_lower for keyword in _BLOCKED_FONT_KEYWORDS)
 
 _FONT_NAME_CANDIDATES = [
     ("WenQuanYi Micro Hei", "Regular"),
@@ -94,6 +132,9 @@ _FONT_NAME_CANDIDATES = [
     ("Noto Sans SC", "Bold"),
     ("Source Han Sans SC", "Regular"),
     ("Source Han Sans SC", "Bold"),
+    ("Arial Unicode MS", "Regular"),
+    ("Microsoft YaHei", "Regular"),
+    ("SimHei", "Regular"),
 ]
 
 _FONT_FILE_PATTERNS = (
@@ -108,6 +149,13 @@ _FONT_FILE_PATTERNS = (
     "SourceHanSansSC-Regular.otf",
     "SourceHanSansSC-Bold.otf",
     "DroidSansFallbackFull.ttf",
+    "Arial Unicode.ttf",
+    "Songti.ttc",
+    "msyh.ttc",
+    "msyhbd.ttc",
+    "simhei.ttf",
+    "simsun.ttc",
+    "kaiti.ttf",
 )
 
 _CJK_FONT_MARKERS = (
@@ -118,10 +166,12 @@ _CJK_FONT_MARKERS = (
     "SourceHanSerif",
     "wqy-",
     "DroidSansFallback",
-    "PingFang",
-    "STHeiti",
+    "Arial Unicode",
+    "Songti",
     "msyh",
     "simhei",
+    "simsun",
+    "kaiti",
 )
 
 _TTC_SC_FACE_INDEXES = {
@@ -135,6 +185,11 @@ _SINGLE_FACE_BOLD_FALLBACKS = {
     "wqy-microhei.ttc",
     "wqy-zenhei.ttc",
     "DroidSansFallbackFull.ttf",
+    "Arial Unicode.ttf",
+    "Songti.ttc",
+    "simhei.ttf",
+    "simsun.ttc",
+    "kaiti.ttf",
 }
 
 
@@ -194,20 +249,27 @@ def _font_search_roots() -> list[Path]:
         Path("/usr/local/share/fonts"),
         Path("~/.local/share/fonts").expanduser(),
         Path("~/.fonts").expanduser(),
+        Path("~/Library/Fonts").expanduser(),
+        Path("/Library/Fonts"),
+        Path("/System/Library/Fonts/Supplemental"),
+        Path("C:/Windows/Fonts"),
+        Path("~/AppData/Local/Microsoft/Windows/Fonts").expanduser(),
     ]
     xdg_data_home = os.getenv("XDG_DATA_HOME")
     if xdg_data_home:
         roots.append(Path(xdg_data_home).expanduser() / "fonts")
-    return roots
+    return [r for r in roots if r.exists()]
 
 
 def _find_font_file(pattern: str) -> Path | None:
     for root in _font_search_roots():
-        if not root.exists():
+        try:
+            matches = sorted(root.rglob(pattern))
+        except (OSError, PermissionError):
             continue
-        matches = sorted(root.rglob(pattern))
-        if matches:
-            return matches[0]
+        for match in matches:
+            if not _is_blocked_font(match):
+                return match
     return None
 
 
@@ -226,7 +288,7 @@ def _font_from_fontconfig(family: str, style: str) -> Path | None:
         return None
 
     path = Path(output)
-    if path.exists() and _is_likely_cjk_font(path):
+    if path.exists() and _is_likely_cjk_font(path) and not _is_blocked_font(path):
         return path
     return None
 
@@ -236,7 +298,7 @@ def _discover_cjk_fonts() -> tuple[Path, Path] | None:
 
     for pattern in _FONT_FILE_PATTERNS:
         path = _find_font_file(pattern)
-        if path:
+        if path and not _is_blocked_font(path):
             discovered[pattern] = path
 
     regular = (
@@ -247,6 +309,12 @@ def _discover_cjk_fonts() -> tuple[Path, Path] | None:
         or discovered.get("NotoSansSC-Regular.ttf")
         or discovered.get("SourceHanSansSC-Regular.otf")
         or discovered.get("DroidSansFallbackFull.ttf")
+        or discovered.get("Arial Unicode.ttf")
+        or discovered.get("Songti.ttc")
+        or discovered.get("msyh.ttc")
+        or discovered.get("simhei.ttf")
+        or discovered.get("simsun.ttc")
+        or discovered.get("kaiti.ttf")
     )
     if regular and regular.name in _SINGLE_FACE_BOLD_FALLBACKS:
         return regular, regular
@@ -256,6 +324,7 @@ def _discover_cjk_fonts() -> tuple[Path, Path] | None:
         or discovered.get("NotoSansCJKsc-Bold.otf")
         or discovered.get("NotoSansSC-Bold.ttf")
         or discovered.get("SourceHanSansSC-Bold.otf")
+        or discovered.get("msyhbd.ttc")
         or regular
     )
     if regular and bold:
@@ -263,7 +332,7 @@ def _discover_cjk_fonts() -> tuple[Path, Path] | None:
 
     for family, style in _FONT_NAME_CANDIDATES:
         font_path = _font_from_fontconfig(family, style)
-        if not font_path:
+        if not font_path or _is_blocked_font(font_path):
             continue
         if style == "Bold" and regular:
             return regular, font_path
@@ -273,22 +342,42 @@ def _discover_cjk_fonts() -> tuple[Path, Path] | None:
     return None
 
 
-def _find_cjk_fonts() -> tuple[Path, Path]:
-    env_regular = _env_font_path(_PDF_FONT_ENV)
+@lru_cache(maxsize=16)
+def _find_cjk_fonts_cached(env_regular: str | None, env_bold: str | None) -> tuple[Path, Path]:
     if env_regular:
-        return env_regular, _env_font_path(_PDF_BOLD_FONT_ENV) or env_regular
+        regular_path = Path(env_regular).expanduser()
+        if not regular_path.exists():
+            raise PDFExportError(f"{_PDF_FONT_ENV} 指向的字体文件不存在: {regular_path}")
+        if env_bold:
+            bold_path = Path(env_bold).expanduser()
+            if not bold_path.exists():
+                raise PDFExportError(f"{_PDF_BOLD_FONT_ENV} 指向的字体文件不存在: {bold_path}")
+        else:
+            bold_path = regular_path
+        return regular_path, bold_path
 
     for regular_path, bold_path in _FONT_CANDIDATES:
         regular = Path(regular_path)
-        if regular.exists():
+        if regular.exists() and not _is_blocked_font(regular):
             bold = Path(bold_path)
-            return regular, bold if bold.exists() else regular
+            return regular, bold if (bold.exists() and not _is_blocked_font(bold)) else regular
 
     discovered = _discover_cjk_fonts()
     if discovered:
         return discovered
 
     raise PDFExportError(_font_missing_message())
+
+
+def _find_cjk_fonts() -> tuple[Path, Path]:
+    env_regular = os.getenv(_PDF_FONT_ENV)
+    env_bold = os.getenv(_PDF_BOLD_FONT_ENV)
+    return _find_cjk_fonts_cached(env_regular, env_bold)
+
+
+def clear_font_cache() -> None:
+    """Clear cached font discovery results."""
+    _find_cjk_fonts_cached.cache_clear()
 
 
 def _collection_font_number(path: Path) -> int:

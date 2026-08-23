@@ -201,6 +201,15 @@ def get_vendor(category: str, method: str = None) -> str:
 
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
+    # 指数接缝：带交易所后缀的指数标识（如 000001.SH）分流到指数模块，绝不
+    # 进入任何个股 vendor（同号裸码会被静默路由到同号个股）。裸 6 位代码
+    # 不受影响，继续走下面的原有 vendor 路由。
+    from .index_data import try_route_index
+
+    _handled, _result = try_route_index(method, *args, **kwargs)
+    if _handled:
+        return _result
+
     category = get_category_for_method(method)
     vendor_config = get_vendor(category, method)
     primary_vendors = [v.strip() for v in vendor_config.split(',')]

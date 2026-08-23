@@ -45,6 +45,26 @@ def _display_report_text(text: Any, ticker: str, final_state: dict[str, Any]) ->
     return normalize_stock_mentions(cleaned, ticker, final_state)
 
 
+@st.cache_data(show_spinner=False)
+def _cached_generate_pdf(
+    final_state: dict[str, Any],
+    ticker: str,
+    trade_date: str,
+    signal: str,
+) -> bytes:
+    return generate_pdf(final_state, ticker, trade_date, signal)
+
+
+@st.cache_data(show_spinner=False)
+def _cached_generate_markdown(
+    final_state: dict[str, Any],
+    ticker: str,
+    trade_date: str,
+    signal: str,
+) -> str:
+    return generate_markdown(final_state, ticker, trade_date, signal)
+
+
 def render_report(
     final_state: dict[str, Any],
     ticker: str,
@@ -65,18 +85,19 @@ def render_report(
     st.markdown(
         f"""
         <div style="
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-            border: 1px solid #333;
+            background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+            border: 1px solid #e2e8f0;
             border-radius: 16px;
             padding: 2rem;
             text-align: center;
             margin: 1rem 0 2rem;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
         ">
-            <div style="font-size:0.9rem; color:#888; letter-spacing:2px;">TRADING SIGNAL</div>
+            <div style="font-size:0.85rem; color:#64748b; font-weight:700; letter-spacing:2px;">TRADING SIGNAL</div>
             <div style="font-size:3.5rem; font-weight:900; color:{color}; margin:0.3rem 0;">
                 {signal.upper()}
             </div>
-            <div style="font-size:1.2rem; color:#f5f1eb;">
+            <div style="font-size:1.2rem; color:#0f172a; font-weight:600;">
                 {ticker_label} · {trade_date}
             </div>
             {stats_html}
@@ -87,11 +108,11 @@ def render_report(
 
     st.caption("⚠️ 本报告由 AI 自动生成，仅供学习研究，不构成投资建议。")
 
-    # Markdown export always works (no font dependency); PDF is generated
-    # lazily and guarded so a PDF/font failure never crashes the results page.
+    # Markdown export always works (no font dependency); PDF generation is
+    # cached with @st.cache_data so page re-renders don't recompute PDF bytes.
     col_md, col_pdf, col_spacer = st.columns([1, 1, 2])
     with col_md:
-        md_text = generate_markdown(final_state, ticker, trade_date, signal)
+        md_text = _cached_generate_markdown(final_state, ticker, trade_date, signal)
         st.download_button(
             "📥 下载 Markdown",
             data=md_text.encode("utf-8"),
@@ -101,7 +122,7 @@ def render_report(
         )
     with col_pdf:
         try:
-            pdf_bytes = generate_pdf(final_state, ticker, trade_date, signal)
+            pdf_bytes = _cached_generate_pdf(final_state, ticker, trade_date, signal)
             st.download_button(
                 "📄 下载 PDF",
                 data=pdf_bytes,
@@ -167,3 +188,14 @@ def render_report(
     if dqs:
         with st.expander("✅ 数据质量", expanded=False):
             st.markdown(_display_report_text(dqs, ticker, final_state))
+
+    if st.session_state.get("debug_mode", False):
+        render_agent_diagnostics(final_state, ticker)
+
+
+def render_agent_diagnostics(final_state: dict[str, Any], ticker: str) -> None:
+    """Render 7-Agent execution diagnostics overview at the bottom of the report."""
+    from web.agent_debug import render_all_agent_diagnostics
+
+    render_all_agent_diagnostics(final_state, ticker, trade_date=str(final_state.get("trade_date", "")))
+

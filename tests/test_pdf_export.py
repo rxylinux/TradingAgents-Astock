@@ -70,3 +70,55 @@ def test_wqy_discovery_reuses_same_font_for_bold(monkeypatch, tmp_path):
     monkeypatch.setattr("web.pdf_export._find_font_file", fake_find_font_file)
 
     assert _discover_cjk_fonts() == (wqy, wqy)
+
+
+def test_blocked_fonts_are_filtered():
+    from web.pdf_export import _FONT_CANDIDATES, _is_blocked_font
+
+    # Ensure slow/problematic macOS system TTCs are not in standard candidate list
+    candidate_paths = [p for pair in _FONT_CANDIDATES for p in pair]
+    for path_str in candidate_paths:
+        assert not _is_blocked_font(path_str), f"Candidate {path_str} should not be a blocked font"
+        assert "PingFang" not in path_str
+        assert "STHeiti" not in path_str
+
+    assert _is_blocked_font("/System/Library/Fonts/PingFang.ttc") is True
+    assert _is_blocked_font("/System/Library/Fonts/STHeiti Light.ttc") is True
+    assert _is_blocked_font("/Library/Fonts/Arial Unicode.ttf") is False
+
+
+def test_custom_env_font_and_caching(monkeypatch, tmp_path):
+    from web.pdf_export import _PDF_FONT_ENV, clear_font_cache
+
+    clear_font_cache()
+    custom_font = tmp_path / "CustomCJK.ttf"
+    custom_font.write_bytes(b"fake-cjk-font")
+
+    monkeypatch.setenv(_PDF_FONT_ENV, str(custom_font))
+    clear_font_cache()
+
+    reg, bold = _find_cjk_fonts()
+    assert reg == custom_font
+    assert bold == custom_font
+
+    # Non-existent font in env should raise PDFExportError
+    monkeypatch.setenv(_PDF_FONT_ENV, str(tmp_path / "non_existent.ttf"))
+    clear_font_cache()
+    with pytest.raises(PDFExportError, match="指向的字体文件不存在"):
+        _find_cjk_fonts()
+
+    clear_font_cache()
+
+
+def test_report_viewer_cached_generators():
+    from web.components.report_viewer import _cached_generate_markdown
+
+    state = {
+        "market_report": "# 技术分析\n- 趋势: 偏强",
+        "final_trade_decision": "HOLD",
+    }
+    md1 = _cached_generate_markdown(state, "600519", "2026-05-30", "HOLD")
+    md2 = _cached_generate_markdown(state, "600519", "2026-05-30", "HOLD")
+    assert md1 == md2
+    assert "A股多Agent投研分析报告" in md1
+
