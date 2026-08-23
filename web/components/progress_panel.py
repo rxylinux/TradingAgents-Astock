@@ -1,4 +1,5 @@
 import html
+import textwrap
 import time
 from typing import Any
 
@@ -124,45 +125,25 @@ def _render_agent_card(
     if duration > 0 or tok_in + tok_out > 0:
         metric_text = f"⏱️ {duration:.1f}s · 📝 {tok_in + tok_out:,} tok"
 
-    card_html = f"""
-    <div style="
-        background: {bg_color};
-        border: 1.5px solid {border_color};
-        border-radius: 8px;
-        padding: 12px 14px;
-        margin-bottom: 12px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-        transition: all 0.2s ease;
-    ">
+    card_html = textwrap.dedent(f"""
+    <div style="background:{bg_color}; border:1.5px solid {border_color}; border-radius:8px; padding:12px 14px; margin-bottom:12px; box-shadow:0 1px 3px rgba(0,0,0,0.04);">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
             <div style="font-weight:700; font-size:0.95rem; color:#0f172a; display:flex; align-items:center; gap:6px;">
                 <span>{icon}</span> <span>{name}</span>
             </div>
-            <span style="
-                background:{badge_bg};
-                color:{badge_color};
-                font-size:0.72rem;
-                font-weight:700;
-                padding:2px 8px;
-                border-radius:12px;
-                border:1px solid {border_color};
-            ">
+            <span style="background:{badge_bg}; color:{badge_color}; font-size:0.72rem; font-weight:700; padding:2px 8px; border-radius:12px; border:1px solid {border_color};">
                 {badge_text}
             </span>
         </div>
-
         <div style="font-size:0.75rem; color:#64748b; margin-bottom:8px; line-height:1.3;">
             {safe_desc}
         </div>
-
         <div style="background:#e2e8f0; border-radius:4px; height:6px; width:100%; overflow:hidden; margin-bottom:8px;">
-            <div style="background:{bar_color}; height:100%; width:{pct}%; transition:width 0.3s ease;"></div>
+            <div style="background:{bar_color}; height:100%; width:{pct}%;"></div>
         </div>
-
         <div style="font-size:0.8rem; color:#1e293b; font-weight:500; margin-bottom:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
             📌 {safe_detail}
         </div>
-
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; font-size:0.72rem; color:#64748b;">
             <div style="display:flex; flex-wrap:wrap; align-items:center;">
                 {tool_badges_html}
@@ -172,7 +153,7 @@ def _render_agent_card(
             </div>
         </div>
     </div>
-    """
+    """).strip()
     st.markdown(card_html, unsafe_allow_html=True)
 
 
@@ -189,21 +170,19 @@ def render_progress(tracker: ProgressTracker) -> None:
     pct = completed / total if total else 0
 
     # Header
-    st.markdown(
-        f"""
-        <div style="display:flex; justify-content:space-between; align-items:flex-end; margin:0.8rem 0 0.4rem; padding-bottom:0.6rem; border-bottom:1px solid #e2e8f0;">
-            <div>
-                <span style="font-size:1.5rem; font-weight:800; color:#0f172a;">⚡ A股投研决策流水线</span>
-                <span style="font-size:1.1rem; font-weight:600; color:#ff5a1f; margin-left:0.8rem;">{tracker.ticker}</span>
-                <span style="font-size:0.9rem; color:#64748b; margin-left:0.5rem;">({tracker.trade_date})</span>
-            </div>
-            <div style="font-size:0.95rem; font-weight:700; color:#0284c7;">
-                ⏱️ 耗时 {_format_time(tracker.elapsed)}
-            </div>
+    header_html = textwrap.dedent(f"""
+    <div style="display:flex; justify-content:space-between; align-items:flex-end; margin:0.8rem 0 0.4rem; padding-bottom:0.6rem; border-bottom:1px solid #e2e8f0;">
+        <div>
+            <span style="font-size:1.5rem; font-weight:800; color:#0f172a;">⚡ A股投研决策流水线</span>
+            <span style="font-size:1.1rem; font-weight:600; color:#ff5a1f; margin-left:0.8rem;">{tracker.ticker}</span>
+            <span style="font-size:0.9rem; color:#64748b; margin-left:0.5rem;">({tracker.trade_date})</span>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        <div style="font-size:0.95rem; font-weight:700; color:#0284c7;">
+            ⏱️ 耗时 {_format_time(tracker.elapsed)}
+        </div>
+    </div>
+    """).strip()
+    st.markdown(header_html, unsafe_allow_html=True)
 
     if tracker.stop_requested:
         st.warning("⚠️ 正在停止当前分析并清空内容；收尾完成后可重新开始。")
@@ -240,19 +219,17 @@ def render_progress(tracker: ProgressTracker) -> None:
     done_analysts = sum(1 for s in analyst_stages if tracker.stage_status(s["id"]) == "done")
     total_analysts = len(analyst_stages)
 
-    st.markdown(
-        f"""
-        <div style="display:flex; justify-content:space-between; align-items:center; margin:0.6rem 0 0.8rem;">
-            <div style="font-size:1.1rem; font-weight:800; color:#0f172a;">
-                🤖 7 位 AI 分析师实时作业矩阵
-            </div>
-            <div style="font-size:0.85rem; font-weight:700; color:{'#16a34a' if done_analysts == total_analysts else '#ea580c'};">
-                已就绪 {done_analysts}/{total_analysts} 位分析师 ({int((done_analysts/total_analysts)*100 if total_analysts else 0)}%)
-            </div>
+    matrix_title_html = textwrap.dedent(f"""
+    <div style="display:flex; justify-content:space-between; align-items:center; margin:0.6rem 0 0.8rem;">
+        <div style="font-size:1.1rem; font-weight:800; color:#0f172a;">
+            🤖 7 位 AI 分析师实时作业矩阵
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        <div style="font-size:0.85rem; font-weight:700; color:{'#16a34a' if done_analysts == total_analysts else '#ea580c'};">
+            已就绪 {done_analysts}/{total_analysts} 位分析师 ({int((done_analysts/total_analysts)*100 if total_analysts else 0)}%)
+        </div>
+    </div>
+    """).strip()
+    st.markdown(matrix_title_html, unsafe_allow_html=True)
 
     # 2-column grid for clear visibility of each agent's active sub-progress
     col_left, col_right = st.columns(2)
@@ -313,25 +290,16 @@ def render_progress(tracker: ProgressTracker) -> None:
             b_color = "#94a3b8"
             bg = "#f8fafc"
 
-        col.markdown(
-            f"""
-            <div style="
-                background:{bg};
-                border:1.5px solid {b_color};
-                border-radius:8px;
-                padding:8px 4px;
-                text-align:center;
-                box-shadow: 0 1px 2px rgba(0,0,0,0.03);
-            ">
-                <div style="font-size:1.3rem; margin-bottom:2px;">{stage.get('icon', '📌')}</div>
-                <div style="font-size:0.85rem; font-weight:700; color:#0f172a;">{stage['name']}</div>
-                <div style="font-size:0.7rem; font-weight:700; color:{b_color}; margin-top:2px;">
-                    {badge_icon} {badge_txt}
-                </div>
+        pipe_card_html = textwrap.dedent(f"""
+        <div style="background:{bg}; border:1.5px solid {b_color}; border-radius:8px; padding:8px 4px; text-align:center; box-shadow:0 1px 2px rgba(0,0,0,0.03);">
+            <div style="font-size:1.3rem; margin-bottom:2px;">{stage.get('icon', '📌')}</div>
+            <div style="font-size:0.85rem; font-weight:700; color:#0f172a;">{stage['name']}</div>
+            <div style="font-size:0.7rem; font-weight:700; color:{b_color}; margin-top:2px;">
+                {badge_icon} {badge_txt}
             </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        </div>
+        """).strip()
+        col.markdown(pipe_card_html, unsafe_allow_html=True)
 
     # Telemetry Monitor
     st.markdown("<div style='margin-top:1rem;'></div>", unsafe_allow_html=True)
