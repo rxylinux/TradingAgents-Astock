@@ -6,10 +6,16 @@ from tradingagents.agents.utils.agent_states import AgentState
 class ConditionalLogic:
     """Handles conditional logic for determining graph flow."""
 
-    def __init__(self, max_debate_rounds=1, max_risk_discuss_rounds=1):
+    def __init__(
+        self,
+        max_debate_rounds=1,
+        max_risk_discuss_rounds=1,
+        enable_early_stopping=False,
+    ):
         """Initialize with configuration parameters."""
         self.max_debate_rounds = max_debate_rounds
         self.max_risk_discuss_rounds = max_risk_discuss_rounds
+        self.enable_early_stopping = enable_early_stopping
 
     def should_continue_market(self, state: AgentState):
         """Determine if market analysis should continue."""
@@ -83,23 +89,51 @@ class ConditionalLogic:
 
     def should_continue_debate(self, state: AgentState) -> str:
         """Determine if debate should continue."""
+        debate_state = state.get("investment_debate_state", {})
+        count = debate_state.get("count", 0)
 
-        if (
-            state["investment_debate_state"]["count"] >= 2 * self.max_debate_rounds
-        ):  # 3 rounds of back-and-forth between 2 agents
+        # 1. Reach max debate rounds
+        if count >= 2 * self.max_debate_rounds:
             return "Research Manager"
-        if state["investment_debate_state"]["current_response"].startswith("Bull"):
+
+        # 2. Early stopping check
+        if self.enable_early_stopping:
+            if debate_state.get("early_stop") or state.get("early_stop_debate"):
+                return "Research Manager"
+            curr_resp = debate_state.get("current_response", "")
+            if count >= 2 and any(tag in curr_resp for tag in ("[CONSENSUS]", "[AGREE]", "[CONVERGED]", "达成共识")):
+                return "Research Manager"
+
+        if debate_state.get("current_response", "").startswith("Bull"):
             return "Bear Researcher"
         return "Bull Researcher"
 
     def should_continue_risk_analysis(self, state: AgentState) -> str:
         """Determine if risk analysis should continue."""
-        if (
-            state["risk_debate_state"]["count"] >= 3 * self.max_risk_discuss_rounds
-        ):  # 3 rounds of back-and-forth between 3 agents
+        risk_state = state.get("risk_debate_state", {})
+        count = risk_state.get("count", 0)
+
+        # 1. Reach max risk discussion rounds
+        if count >= 3 * self.max_risk_discuss_rounds:
             return "Portfolio Manager"
-        if state["risk_debate_state"]["latest_speaker"].startswith("Aggressive"):
+
+        # 2. Early stopping check
+        if self.enable_early_stopping:
+            if risk_state.get("early_stop") or state.get("early_stop_risk"):
+                return "Portfolio Manager"
+            if count >= 3:
+                responses = [
+                    risk_state.get("current_aggressive_response", ""),
+                    risk_state.get("current_conservative_response", ""),
+                    risk_state.get("current_neutral_response", ""),
+                ]
+                if any(any(tag in r for tag in ("[CONSENSUS]", "[AGREE]", "[CONVERGED]", "达成共识")) for r in responses if r):
+                    return "Portfolio Manager"
+
+        speaker = risk_state.get("latest_speaker", "")
+        if speaker.startswith("Aggressive"):
             return "Conservative Analyst"
-        if state["risk_debate_state"]["latest_speaker"].startswith("Conservative"):
+        if speaker.startswith("Conservative"):
             return "Neutral Analyst"
         return "Aggressive Analyst"
+

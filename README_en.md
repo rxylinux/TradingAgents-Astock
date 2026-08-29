@@ -17,7 +17,7 @@
   <a href="https://github.com/simonlin1212/tradingagents-astock/network/members"><img alt="Forks" src="https://img.shields.io/github/forks/simonlin1212/tradingagents-astock?style=social"/></a>
   <a href="https://arxiv.org/abs/2412.20138"><img alt="Paper" src="https://img.shields.io/badge/paper-arXiv_2412.20138-B31B1B?logo=arxiv"/></a>
   <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-blue"/></a>
-  <a href="./CHANGES_FROM_UPSTREAM.md"><img alt="Changes" src="https://img.shields.io/badge/changes-CHANGES-orange"/></a>
+  <a href="./docs/CHANGES_FROM_UPSTREAM.md"><img alt="Changes" src="https://img.shields.io/badge/changes-CHANGES-orange"/></a>
 </p>
 
 <p align="center">
@@ -461,8 +461,12 @@ TradingAgents-Astock/
 │       ├── sidebar.py         # Sidebar (inputs + history)
 │       ├── progress_panel.py  # Real-time progress panel
 │       └── report_viewer.py   # Report display
-├── test_astock.py             # E2E integration tests
-├── CHANGES_FROM_UPSTREAM.md   # Complete change log versus upstream
+├── docs/                      # Documentation and troubleshooting
+│   ├── CHANGES_FROM_UPSTREAM.md
+│   ├── troubleshooting/
+│   └── development/
+├── examples/                  # Example scripts
+├── scripts/                   # Maintenance and QA scripts
 ├── NOTICE                     # Apache 2.0 attribution notice
 ├── LICENSE                    # Apache 2.0 license
 └── pyproject.toml             # Package definition and dependencies

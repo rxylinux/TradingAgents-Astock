@@ -17,4 +17,4 @@ Modifications in this fork include:
 - CSI 300 benchmark for alpha calculation (replacing SPY)
 - Various prompt and pipeline adaptations for A-share market specifics
 
-See CHANGES_FROM_UPSTREAM.md for the full list of modifications.
+See docs/CHANGES_FROM_UPSTREAM.md for the full list of modifications.

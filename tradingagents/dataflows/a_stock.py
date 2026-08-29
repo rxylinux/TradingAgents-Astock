@@ -33,6 +33,7 @@ import pandas as pd
 import requests as _requests
 
 from .utils import safe_ticker_component
+from .cache_utils import cached_data, robust_api_call
 
 logger = logging.getLogger(__name__)
 
@@ -575,7 +576,7 @@ def _eastmoney_datacenter(
     sort_columns: str = "",
     sort_types: str = "-1",
 ) -> list[dict]:
-    """东财数据中心统一查询 — 龙虎榜/解禁 共用."""
+    """东财数据中心统一查询 — 龙虎榜/解禁 共用 (具备自动重试与兜底)."""
     params = {
         "reportName": report_name,
         "columns": columns,
@@ -587,11 +588,23 @@ def _eastmoney_datacenter(
         "source": "WEB",
         "client": "WEB",
     }
-    r = _em_get(_DATACENTER_URL, params=params, timeout=15)
-    d = r.json()
-    if d.get("result") and d["result"].get("data"):
-        return d["result"]["data"]
-    return []
+
+    def _fetch():
+        r = _em_get(_DATACENTER_URL, params=params, timeout=15)
+        d = r.json()
+        if d.get("result") and d["result"].get("data"):
+            return d["result"]["data"]
+        return []
+
+    try:
+        return robust_api_call(
+            _fetch,
+            max_retries=2,
+            fallback_value=[],
+            error_log_prefix=f"Eastmoney datacenter query failed for {report_name}",
+        )
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -817,8 +830,8 @@ def _load_ohlcv_astock(symbol: str, curr_date: str) -> pd.DataFrame:
 
 def get_astock_history_df(
     symbol: str,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> pd.DataFrame:
     """Get full daily OHLCV DataFrame for an A-stock symbol across date range."""
     df = _fetch_raw_ohlcv_astock(symbol, target_date=end_date)
@@ -1209,8 +1222,19 @@ def _get_financial_report_sina(
         "page": "1",
         "num": "20",
     }
-    r = _requests.get(url, params=params, headers={"User-Agent": _UA}, timeout=15)
-    d = r.json()
+    def _fetch():
+        r = _requests.get(url, params=params, headers={"User-Agent": _UA}, timeout=15)
+        return r.json()
+
+    try:
+        d = robust_api_call(
+            _fetch,
+            max_retries=2,
+            fallback_value={},
+            error_log_prefix=f"Sina finance report query failed for {code}",
+        )
+    except Exception:
+        d = {}
 
     result = d.get("result", {}).get("data", {})
     items = result.get(source_type, [])
@@ -1233,6 +1257,7 @@ def _get_financial_report_sina(
     return df.head(8)
 
 
+@cached_data(namespace="financials", ttl_seconds=3600.0)
 def get_balance_sheet(
     ticker: Annotated[str, "A-stock code"],
     freq: Annotated[str, "frequency: 'annual' or 'quarterly'"] = "quarterly",
@@ -1264,6 +1289,7 @@ def get_balance_sheet(
 # ---- 5. get_cashflow ----
 
 
+@cached_data(namespace="financials", ttl_seconds=3600.0)
 def get_cashflow(
     ticker: Annotated[str, "A-stock code"],
     freq: Annotated[str, "frequency: 'annual' or 'quarterly'"] = "quarterly",
@@ -1295,6 +1321,7 @@ def get_cashflow(
 # ---- 6. get_income_statement ----
 
 
+@cached_data(namespace="financials", ttl_seconds=3600.0)
 def get_income_statement(
     ticker: Annotated[str, "A-stock code"],
     freq: Annotated[str, "frequency: 'annual' or 'quarterly'"] = "quarterly",
@@ -1985,6 +2012,7 @@ _BAIDU_PAE_HEADERS = {
 # ---- 13. get_concept_blocks ----
 
 
+@cached_data(namespace="concept_blocks", ttl_seconds=3600.0)
 def get_concept_blocks(
     ticker: Annotated[str, "A-stock code (e.g. 688017)"],
 ) -> str:
@@ -2210,6 +2238,7 @@ def get_fund_flow(
 # 15. Dragon Tiger Board (龙虎榜)
 # ---------------------------------------------------------------------------
 
+@cached_data(namespace="dragon_tiger", ttl_seconds=3600.0)
 def get_dragon_tiger_board(
     ticker: str,
     trade_date: str,
@@ -2338,6 +2367,7 @@ def get_dragon_tiger_board(
 # 16. Lockup Expiry Calendar (限售解禁日历)
 # ---------------------------------------------------------------------------
 
+@cached_data(namespace="lockup", ttl_seconds=3600.0)
 def get_lockup_expiry(
     ticker: str,
     trade_date: str,
@@ -2419,6 +2449,7 @@ def get_lockup_expiry(
 # 17. Industry Comparison (行业横向对比)
 # ---------------------------------------------------------------------------
 
+@cached_data(namespace="industry", ttl_seconds=3600.0)
 def get_industry_comparison(
     ticker: str,
     trade_date: str,

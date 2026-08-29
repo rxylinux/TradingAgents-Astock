@@ -42,6 +42,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dev = [
+    "ruff>=0.9.0",
+    "pytest>=8.0.0",
+]
 # 走个人 Claude Pro/Max 订阅额度（而非按 token 计费的 Anthropic API）。
 # 依赖链为 claude-agent-sdk → mcp → httpx2，**不碰 httpx**，故与 mootdx 的
 # httpx<0.26 无冲突（已 uv lock 实测）——与 #87 移除的 [google] 情况不同。
@@ -82,6 +86,7 @@ include = ["tradingagents*", "cli*", "web*"]
 cli = ["static/*"]
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
@@ -92,3 +97,26 @@ markers = [
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = [
+    "E501",  # line too long
+    "E402",  # module level import not at top of file
+    "F401",  # imported but unused (facades and re-exports)
+    "F403",  # star imports
+    "F405",  # star imports
+    "F541",  # f-string without placeholder
+    "F841",  # local variable assigned but never used
+    "W291",  # trailing whitespace
+    "W292",  # no newline at end of file
+    "W293",  # blank line whitespace
+]
+
+
+
+

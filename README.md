@@ -17,7 +17,7 @@
   <a href="https://github.com/simonlin1212/tradingagents-astock/network/members"><img alt="Forks" src="https://img.shields.io/github/forks/simonlin1212/tradingagents-astock?style=social"/></a>
   <a href="https://arxiv.org/abs/2412.20138"><img alt="论文" src="https://img.shields.io/badge/论文-arXiv_2412.20138-B31B1B?logo=arxiv"/></a>
   <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-blue"/></a>
-  <a href="./CHANGES_FROM_UPSTREAM.md"><img alt="改动记录" src="https://img.shields.io/badge/改动记录-CHANGES-orange"/></a>
+  <a href="./docs/CHANGES_FROM_UPSTREAM.md"><img alt="改动记录" src="https://img.shields.io/badge/改动记录-CHANGES-orange"/></a>
 </p>
 
 <p align="center">
@@ -519,8 +519,12 @@ TradingAgents-Astock/
 │       ├── sidebar.py         # 侧边栏（输入 + 历史）
 │       ├── progress_panel.py  # 实时进度面板
 │       └── report_viewer.py   # 报告展示
-├── test_astock.py             # E2E 集成测试
-├── CHANGES_FROM_UPSTREAM.md   # 与上游的完整改动记录
+├── docs/                      # 文档与故障排查记录
+│   ├── CHANGES_FROM_UPSTREAM.md
+│   ├── troubleshooting/
+│   └── development/
+├── examples/                  # 示例脚本
+├── scripts/                   # 维护与质量验证脚本
 ├── NOTICE                     # Apache 2.0 归属声明
 ├── LICENSE                    # Apache 2.0 许可证
 └── pyproject.toml             # 包定义与依赖
