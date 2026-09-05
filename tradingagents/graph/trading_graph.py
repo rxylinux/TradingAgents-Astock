@@ -511,7 +511,7 @@ class TradingAgentsGraph:
         trade_date: str,
         holding_days: int = 5,
         benchmark_ticker: str = "000300.SH",
-    ) -> Tuple[Optional[float], Optional[float], Optional[int]]:
+    ) -> Tuple[Optional[float], Optional[float], Optional[int], Optional[str]]:
         """Fetch raw and alpha return for ticker over holding_days from trade_date.
 
         For A-share stocks (6-digit numeric or with SH/SZ/BJ/SS prefix/suffix,
@@ -520,9 +520,12 @@ class TradingAgentsGraph:
         stock/index and CSI 300 benchmark returns. Yahoo Finance is retained as a fallback
         for non-A-share symbols or if native data is unavailable.
 
-        Returns (raw_return, alpha_return, actual_holding_days) or
-        (None, None, None) if price data is unavailable (too recent, delisted,
-        or network error).
+        Returns ``(raw_return, alpha_return, actual_holding_days, window_end_date)``
+        where ``window_end_date`` is the actual last trading date of the return
+        window (from market data — not calendar arithmetic). Returns
+        ``(None, None, None, None)`` if price data is unavailable (too recent,
+        delisted, or network error). The end date is what makes a resolved
+        memory entry provably knowable at a given analysis point-in-time (R4).
         """
         try:
             start = datetime.strptime(trade_date, "%Y-%m-%d")
@@ -563,7 +566,8 @@ class TradingAgentsGraph:
                                     / bench_df["Close"].iloc[0]
                                 )
                                 alpha = raw - bench_ret
-                                return raw, alpha, actual_days
+                                window_end = pd.to_datetime(stock_df["Date"].iloc[actual_days])
+                                return raw, alpha, actual_days, window_end.strftime("%Y-%m-%d")
                 except Exception as e:
                     logger.debug("Native return fetch failed for %s: %s", ticker, e)
 
@@ -571,7 +575,7 @@ class TradingAgentsGraph:
             yf_symbol = _normalize_yfinance_ticker(ticker)
             if _is_unsupported_by_yfinance(yf_symbol):
                 # Beijing Stock Exchange has no Yahoo Finance coverage under any suffix
-                return None, None, None
+                return None, None, None, None
 
             yf_bench = _normalize_yfinance_ticker(benchmark_ticker)
             if _is_unsupported_by_yfinance(yf_bench):
@@ -581,11 +585,11 @@ class TradingAgentsGraph:
             benchmark = yf.Ticker(yf_bench).history(start=trade_date, end=end_str)
 
             if len(stock) < 2 or len(benchmark) < 2:
-                return None, None, None
+                return None, None, None, None
 
             actual_days = min(holding_days, len(stock) - 1, len(benchmark) - 1)
             if actual_days < 1:
-                return None, None, None
+                return None, None, None, None
 
             raw = float(
                 (stock["Close"].iloc[actual_days] - stock["Close"].iloc[0])
@@ -596,13 +600,14 @@ class TradingAgentsGraph:
                 / benchmark["Close"].iloc[0]
             )
             alpha = raw - bench_ret
-            return raw, alpha, actual_days
+            window_end = pd.to_datetime(stock.index[actual_days])
+            return raw, alpha, actual_days, window_end.strftime("%Y-%m-%d")
         except Exception as e:
             logger.warning(
                 "Could not resolve outcome for %s on %s (will retry next run): %s",
                 ticker, trade_date, e,
             )
-            return None, None, None
+            return None, None, None, None
 
     def _resolve_pending_entries(self, ticker: str) -> None:
         """Resolve pending log entries for ticker at the start of a new run.
@@ -620,7 +625,7 @@ class TradingAgentsGraph:
 
         updates = []
         for entry in pending:
-            raw, alpha, days = self._fetch_returns(ticker, entry["date"])
+            raw, alpha, days, window_end = self._fetch_returns(ticker, entry["date"])
             if raw is None:
                 continue  # price not available yet — try again next run
             reflection = self.reflector.reflect_on_final_decision(
@@ -635,6 +640,8 @@ class TradingAgentsGraph:
                 "alpha_return": alpha,
                 "holding_days": days,
                 "reflection": reflection,
+                # 实际收益窗口结束日：历史分析据此判断该收益在何时可知（R4）
+                "outcome_end": window_end,
             })
 
         if updates:
@@ -698,15 +705,44 @@ class TradingAgentsGraph:
             args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
 
         if checkpoint_enabled and resume_step is not None:
+            # 旧 checkpoint 可能携带未经时间过滤的 past_context（R4 之前的版本
+            # 写入）。恢复前按本次分析时点重算并覆盖，避免历史运行沿用未来
+            # 记忆；无法读取/更新时保持原状态并降级为日志提示。
+            try:
+                snap = self.graph.get_state(args["config"])
+                stale_ctx = (snap.values or {}).get("past_context")
+                fresh_ctx = self._past_context_as_of(company_name, str(trade_date))
+                if stale_ctx != fresh_ctx:
+                    self.graph.update_state(args["config"], {"past_context": fresh_ctx})
+                    logger.info(
+                        "Refreshed past_context on resumed checkpoint (time-bound filter)"
+                    )
+            except Exception:
+                logger.warning(
+                    "Could not refresh past_context on resumed checkpoint for %s; "
+                    "the resumed run keeps the checkpointed context",
+                    company_name,
+                    exc_info=True,
+                )
             return None, args, resume_step
 
         # Initialize state only for fresh runs. Passing a new initial state to
         # LangGraph would start a new run and replay completed nodes.
-        past_context = self.memory_log.get_past_context(company_name)
+        past_context = self._past_context_as_of(company_name, str(trade_date))
         init_agent_state = self.propagator.create_initial_state(
             company_name, trade_date, past_context=past_context
         )
         return init_agent_state, args, resume_step
+
+    def _past_context_as_of(self, company_name: str, trade_date: str) -> str:
+        """Memory context limited to what was knowable at the analysis time.
+
+        ``trade_date`` is interpreted as *after that day's close*: same-day
+        decisions and outcomes whose window closed that day are visible.
+        Passing ``as_of`` only filters; the memory log itself is never
+        rewritten (R4).
+        """
+        return self.memory_log.get_past_context(company_name, as_of=trade_date)
 
     def finalize_graph_run(self, company_name, trade_date, final_state):
         """Persist a completed run and clear its checkpoint."""

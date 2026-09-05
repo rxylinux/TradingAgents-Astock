@@ -72,7 +72,7 @@ class TradingAgentsIndexGraph(TradingAgentsGraph):
 
     def _fetch_returns(
         self, ticker: str, trade_date: str, holding_days: int = 5
-    ) -> Tuple[Optional[float], Optional[float], Optional[int]]:
+    ) -> Tuple[Optional[float], Optional[float], Optional[int], Optional[str]]:
         """指数版收益结算：基准恒为沪深300，唯一例外是分析对象=沪深300 本身。
 
         分析对象就是 000300.SH 时对自身算 alpha 恒为 0，改用上证指数并注明。

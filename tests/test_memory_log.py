@@ -1,5 +1,7 @@
 """Tests for TradingMemoryLog — storage, deferred reflection, PM injection, legacy removal."""
 
+import re
+
 import pytest
 import pandas as pd
 from unittest.mock import MagicMock, patch
@@ -513,7 +515,11 @@ class TestDeferredReflection:
         assert e["alpha"] == "+2.1%"
         assert e["holding"] == "5d"
         raw_text = (tmp_path / "trading_memory.md").read_text(encoding="utf-8")
-        assert "[2026-01-10 | NVDA | Buy | +4.2% | +2.1% | 5d]\n\nDECISION:" in raw_text
+        # R4 起 resolved tag 追加回填日期元数据（无 outcome_end 时省略 end=）
+        assert re.search(
+            r"\[2026-01-10 \| NVDA \| Buy \| \+4\.2% \| \+2\.1% \| 5d \| resolved=\d{4}-\d{2}-\d{2}\]\n\nDECISION:",
+            raw_text,
+        )
 
     # Reflector.reflect_on_final_decision
 
@@ -550,7 +556,7 @@ class TestDeferredReflection:
         with patch("tradingagents.dataflows.a_stock.get_astock_history_df", return_value=_native_kline_df(stock_prices)), \
              patch("tradingagents.dataflows.index_data.get_index_history_df", return_value=_native_kline_df(bench_prices)), \
              patch("yfinance.Ticker") as mock_yf:
-            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "688017", "2026-01-05")
+            raw, alpha, days, window_end = TradingAgentsGraph._fetch_returns(mock_graph, "688017", "2026-01-05")
             mock_yf.assert_not_called()
         assert raw is not None and alpha is not None and days is not None
         assert isinstance(raw, float) and isinstance(alpha, float) and isinstance(days, int)
@@ -567,18 +573,18 @@ class TestDeferredReflection:
         with patch("tradingagents.dataflows.a_stock.get_astock_history_df", return_value=_native_kline_df(stock_prices)), \
              patch("tradingagents.dataflows.index_data.get_index_history_df", return_value=_native_kline_df(bench_prices)):
             for bse_ticker in ("920002", "830799", "430047", "830799.BJ", "BJ920002"):
-                raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, bse_ticker, "2026-01-05")
+                raw, alpha, days, window_end = TradingAgentsGraph._fetch_returns(mock_graph, bse_ticker, "2026-01-05")
                 assert raw is not None, f"BSE ticker {bse_ticker} must resolve outcome"
                 assert days == 5
                 assert round(raw, 4) == 0.25
 
     def test_fetch_returns_bse_returns_none_when_no_native_data(self):
-        """BSE stocks return (None, None, None) safely if native data is unavailable."""
+        """BSE stocks return (None, None, None, None) safely if native data is unavailable."""
         mock_graph = MagicMock(spec=TradingAgentsGraph)
         with patch("tradingagents.dataflows.a_stock.get_astock_history_df", return_value=pd.DataFrame()), \
              patch("tradingagents.dataflows.index_data.get_index_history_df", return_value=pd.DataFrame()):
-            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "920002", "2026-01-05")
-            assert raw is None and alpha is None and days is None
+            raw, alpha, days, window_end = TradingAgentsGraph._fetch_returns(mock_graph, "920002", "2026-01-05")
+            assert raw is None and alpha is None and days is None and window_end is None
 
     def test_fetch_returns_uses_exchange_qualified_astock_symbol_on_yfinance_fallback(self):
         mock_graph = MagicMock(spec=TradingAgentsGraph)
@@ -592,30 +598,30 @@ class TestDeferredReflection:
                 m.history.return_value = _price_df(bench_prices if sym == "000300.SS" else stock_prices)
                 return m
             mock_ticker_cls.side_effect = _make_ticker
-            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "600519", "2026-01-05")
+            raw, alpha, days, window_end = TradingAgentsGraph._fetch_returns(mock_graph, "600519", "2026-01-05")
 
         assert mock_ticker_cls.call_args_list[0].args == ("600519.SS",)
         assert raw is not None and alpha is not None and days == 5
 
     def test_fetch_returns_too_recent(self):
-        """Only 1 data point available → returns (None, None, None), no crash."""
+        """Only 1 data point available → returns all-None tuple, no crash."""
         mock_graph = MagicMock(spec=TradingAgentsGraph)
         with patch("yfinance.Ticker") as mock_ticker_cls:
             m = MagicMock()
             m.history.return_value = _price_df([100.0])
             mock_ticker_cls.return_value = m
-            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "NVDA", "2026-04-19")
-        assert raw is None and alpha is None and days is None
+            raw, alpha, days, window_end = TradingAgentsGraph._fetch_returns(mock_graph, "NVDA", "2026-04-19")
+        assert raw is None and alpha is None and days is None and window_end is None
 
     def test_fetch_returns_delisted(self):
-        """Empty DataFrame → returns (None, None, None), no crash."""
+        """Empty DataFrame → returns all-None tuple, no crash."""
         mock_graph = MagicMock(spec=TradingAgentsGraph)
         with patch("yfinance.Ticker") as mock_ticker_cls:
             m = MagicMock()
             m.history.return_value = pd.DataFrame({"Close": []})
             mock_ticker_cls.return_value = m
-            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "XXXXXFAKE", "2026-01-10")
-        assert raw is None and alpha is None and days is None
+            raw, alpha, days, window_end = TradingAgentsGraph._fetch_returns(mock_graph, "XXXXXFAKE", "2026-01-10")
+        assert raw is None and alpha is None and days is None and window_end is None
 
     def test_fetch_returns_benchmark_shorter_than_stock(self):
         """CSI 300 having fewer rows than the stock must not raise IndexError."""
@@ -624,7 +630,7 @@ class TestDeferredReflection:
         mock_graph = MagicMock(spec=TradingAgentsGraph)
         with patch("tradingagents.dataflows.a_stock.get_astock_history_df", return_value=_native_kline_df(stock_prices)), \
              patch("tradingagents.dataflows.index_data.get_index_history_df", return_value=_native_kline_df(bench_prices)):
-            raw, alpha, days = TradingAgentsGraph._fetch_returns(mock_graph, "688017", "2026-01-05")
+            raw, alpha, days, window_end = TradingAgentsGraph._fetch_returns(mock_graph, "688017", "2026-01-05")
         assert raw is not None and alpha is not None and days is not None
         assert days == 2
 
@@ -640,7 +646,7 @@ class TestDeferredReflection:
             return _native_kline_df(index_prices)
 
         with patch("tradingagents.dataflows.index_data.get_index_history_df", side_effect=mock_get_index):
-            raw, alpha, days = TradingAgentsIndexGraph._fetch_returns(mock_index_graph, "000300.SH", "2026-01-05")
+            raw, alpha, days, window_end = TradingAgentsIndexGraph._fetch_returns(mock_index_graph, "000300.SH", "2026-01-05")
         assert raw is not None and alpha is not None and days == 5
         assert round(raw, 4) == 0.015
         assert round(alpha, 4) == round(0.015 - (3230.0 / 3200.0 - 1), 4)
@@ -657,7 +663,7 @@ class TestDeferredReflection:
             return _native_kline_df(chinext_prices)
 
         with patch("tradingagents.dataflows.index_data.get_index_history_df", side_effect=mock_get_index):
-            raw, alpha, days = TradingAgentsIndexGraph._fetch_returns(mock_index_graph, "399006.SZ", "2026-01-05")
+            raw, alpha, days, window_end = TradingAgentsIndexGraph._fetch_returns(mock_index_graph, "399006.SZ", "2026-01-05")
         assert raw is not None and alpha is not None and days == 5
         assert round(raw, 4) == 0.03
         assert round(alpha, 4) == round(0.03 - (4030.0 / 4000.0 - 1), 4)
@@ -670,7 +676,7 @@ class TestDeferredReflection:
         log.store_decision("AAPL", "2026-01-10", DECISION_BUY)
         mock_graph = MagicMock(spec=TradingAgentsGraph)
         mock_graph.memory_log = log
-        mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
+        mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5, "2026-01-12"))
         TradingAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
         mock_graph._fetch_returns.assert_not_called()
         assert len(log.get_pending_entries()) == 1
@@ -684,7 +690,7 @@ class TestDeferredReflection:
         mock_graph = MagicMock(spec=TradingAgentsGraph)
         mock_graph.memory_log = log
         mock_graph.reflector = mock_reflector
-        mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5))
+        mock_graph._fetch_returns = MagicMock(return_value=(0.05, 0.02, 5, "2026-01-12"))
         TradingAgentsGraph._resolve_pending_entries(mock_graph, "NVDA")
         assert log.get_pending_entries() == []
         entries = log.load_entries()
@@ -825,6 +831,339 @@ class TestPortfolioManagerInjection:
         assert "Correct call." in past_ctx
         assert "DECISION:" in past_ctx
         assert "REFLECTION:" in past_ctx
+
+
+# ---------------------------------------------------------------------------
+# R4: as_of（分析时点）过滤——历史分析不得使用未来记忆
+# ---------------------------------------------------------------------------
+
+
+class TestAsOfContextFiltering:
+    """get_past_context(as_of=...) 必须只注入分析时点当时已可知的内容。
+
+    时间语义：as_of 视为该交易日收盘后的时点——当日决策与当日收盘已可知的
+    收益（outcome end == as_of）都可见；跨过 as_of 的收益窗口属于未来信息。
+    """
+
+    def _seed_resolved(self, tmp_path, ticker, date, decision, reflection,
+                       raw="+20.0%", alpha="+5.0%", holding="5d",
+                       end=None, resolved=None, filename="trading_memory.md"):
+        meta = ""
+        if end:
+            meta += f" | end={end}"
+        if resolved:
+            meta += f" | resolved={resolved}"
+        entry = (
+            f"[{date} | {ticker} | Buy | {raw} | {alpha} | {holding}{meta}]\n\n"
+            f"DECISION:\n{decision}\n\n"
+            f"REFLECTION:\n{reflection}"
+            + _SEP
+        )
+        with open(tmp_path / filename, "a", encoding="utf-8") as f:
+            f.write(entry)
+
+    def test_as_of_excludes_future_decision_and_outcome(self, tmp_path):
+        """分析一月份时，不返回八月份的决策、收益和复盘。"""
+        log = make_log(tmp_path)
+        self._seed_resolved(
+            tmp_path, "600519", "2026-08-01", "August buy decision.",
+            "August reflection lesson.", end="2026-08-10", resolved="2026-09-01",
+        )
+
+        ctx = log.get_past_context("600519", as_of="2026-01-15")
+
+        assert ctx == "", f"分析 2026-01-15 不应看到 8 月记忆，实际:\n{ctx}"
+
+    def test_as_of_includes_provably_available_history(self, tmp_path):
+        """有充分时间证据（end ≤ as_of）且当时已可用的经验仍能正常注入。"""
+        log = make_log(tmp_path)
+        self._seed_resolved(
+            tmp_path, "600519", "2025-12-01", "December buy decision.",
+            "December reflection lesson.", end="2025-12-10", resolved="2025-12-11",
+        )
+
+        ctx = log.get_past_context("600519", as_of="2026-01-15")
+
+        assert "December buy decision." in ctx
+        assert "December reflection lesson." in ctx
+        assert "+20.0%" in ctx, "已可知的收益应完整注入"
+
+    def test_decision_visible_but_future_outcome_hidden(self, tmp_path):
+        """决策在分析日前、收益结束日在分析日后：不泄漏未来收益或复盘。"""
+        log = make_log(tmp_path)
+        self._seed_resolved(
+            tmp_path, "600519", "2026-01-10", "Mid-January decision.",
+            "Future reflection must not leak.", end="2026-01-20", resolved="2026-01-21",
+        )
+
+        ctx = log.get_past_context("600519", as_of="2026-01-15")
+
+        assert "Mid-January decision." in ctx, "决策本身在分析日前，应可见"
+        assert "Future reflection must not leak." not in ctx, "未来复盘泄漏"
+        assert "+20.0%" not in ctx, "未来收益泄漏"
+
+    def test_same_day_boundary_counts_as_known(self, tmp_path):
+        """收益窗口在 as_of 当日结束（收盘后语义）：收益与复盘可见。"""
+        log = make_log(tmp_path)
+        self._seed_resolved(
+            tmp_path, "600519", "2026-01-08", "Decision text.",
+            "Same-day reflection.", end="2026-01-15", resolved="2026-01-15",
+        )
+
+        ctx = log.get_past_context("600519", as_of="2026-01-15")
+
+        assert "Decision text." in ctx
+        assert "Same-day reflection." in ctx
+        assert "+20.0%" in ctx
+
+    def test_cross_ticker_respects_as_of(self, tmp_path):
+        """跨标的经验同样遵守时点限制。"""
+        log = make_log(tmp_path)
+        self._seed_resolved(
+            tmp_path, "000858", "2026-08-01", "Other ticker august decision.",
+            "Other ticker august lesson.", end="2026-08-10", resolved="2026-09-01",
+        )
+        self._seed_resolved(
+            tmp_path, "000858", "2025-11-01", "Other ticker old decision.",
+            "Other ticker old lesson.", end="2025-11-10", resolved="2025-11-11",
+        )
+
+        ctx = log.get_past_context("600519", as_of="2026-01-15")
+
+        assert "Other ticker old lesson." in ctx
+        assert "august" not in ctx.lower(), "8 月跨标的记忆泄漏进 1 月分析"
+
+    def test_legacy_entry_degraded_in_as_of_mode(self, tmp_path):
+        """旧格式（无时间元数据）resolved 条目：决策可注入，收益/复盘保守剔除。"""
+        log = make_log(tmp_path)
+        _seed_completed(
+            tmp_path, "600519", "2025-12-01",
+            "Legacy decision without outcome metadata.",
+            "Legacy reflection that cannot be proven available.",
+        )
+
+        ctx = log.get_past_context("600519", as_of="2026-01-15")
+
+        assert "Legacy decision without outcome metadata." in ctx
+        assert "Legacy reflection that cannot be proven available." not in ctx, (
+            "无法证明当时可用的复盘必须剔除（保守行为）"
+        )
+        assert "+1.0%" not in ctx, "无法证明当时可用的收益必须剔除"
+
+        # as_of=None（实时分析）保持原行为：完整注入
+        live_ctx = log.get_past_context("600519")
+        assert "Legacy reflection that cannot be proven available." in live_ctx
+
+    def test_unparseable_entry_date_excluded_in_as_of_mode(self, tmp_path):
+        """日期解析失败的条目在历史模式下保守排除；实时模式保持原行为。"""
+        log = make_log(tmp_path)
+        self._seed_resolved(
+            tmp_path, "600519", "not-a-date", "Garbage date decision.",
+            "Garbage date reflection.",
+        )
+
+        assert log.get_past_context("600519", as_of="2026-01-15") == ""
+        assert "Garbage date decision." in log.get_past_context("600519")
+
+    def test_legacy_and_new_entries_coexist(self, tmp_path):
+        """旧格式与新格式条目共存时读写正常：解析互不干扰。"""
+        log = make_log(tmp_path)
+        _seed_completed(tmp_path, "600519", "2025-06-01", "Old entry.", "Old reflection.")
+        self._seed_resolved(
+            tmp_path, "600519", "2025-12-01", "New entry.", "New reflection.",
+            end="2025-12-10", resolved="2025-12-11",
+        )
+
+        entries = log.load_entries()
+        by_date = {e["date"]: e for e in entries}
+        assert by_date["2025-06-01"].get("outcome_end") is None
+        assert by_date["2025-12-01"].get("outcome_end") == "2025-12-10"
+        assert by_date["2025-12-01"].get("resolved_at") == "2025-12-11"
+
+        # 追加新决策不受影响
+        log.store_decision("600519", "2026-01-05", DECISION_BUY)
+        assert len(log.get_pending_entries()) == 1
+
+    def test_update_with_outcome_writes_time_metadata(self, tmp_path):
+        """回填写入 end/resolved 元数据并完整 roundtrip。"""
+        log = make_log(tmp_path)
+        log.store_decision("600519", "2026-01-05", DECISION_BUY)
+
+        with patch("tradingagents.agents.utils.memory.datetime") as mock_dt:
+            mock_dt.now.return_value.strftime.return_value = "2026-01-20"
+            log.update_with_outcome(
+                "600519", "2026-01-05", 0.05, 0.02, 5, "Lesson.",
+                outcome_end="2026-01-12",
+            )
+
+        entries = log.load_entries()
+        assert entries[0]["outcome_end"] == "2026-01-12"
+        assert entries[0]["resolved_at"] == "2026-01-20"
+        raw = (tmp_path / "trading_memory.md").read_text(encoding="utf-8")
+        assert "end=2026-01-12" in raw
+        assert "resolved=2026-01-20" in raw
+
+    def test_as_of_accepts_datetime_like_string(self, tmp_path):
+        """带时分秒的 as_of（如 "2026-01-15 15:30:00"）同样被识别。"""
+        log = make_log(tmp_path)
+        self._seed_resolved(
+            tmp_path, "600519", "2026-08-01", "Future decision.",
+            "Future lesson.", end="2026-08-10", resolved="2026-09-01",
+        )
+        ctx = log.get_past_context("600519", as_of="2026-01-15 15:30:00")
+        assert ctx == ""
+
+
+# ---------------------------------------------------------------------------
+# R4: 图运行入口的时点边界（prepare_graph_run / 回填 / 恢复路径）
+# ---------------------------------------------------------------------------
+
+
+class TestPointInTimeGraphIntegration:
+    """历史分析不使用未来记忆——从运行入口到恢复路径全程生效。"""
+
+    def _fake_graph(self, tmp_path, checkpoint_enabled=False):
+        log = TradingMemoryLog(
+            {"memory_log_path": str(tmp_path / "trading_memory.md")}
+        )
+        # 不用 spec=：propagator/graph 等是实例属性，spec 模式禁止赋值
+        graph = MagicMock()
+        graph.memory_log = log
+        graph.config = {
+            "checkpoint_enabled": checkpoint_enabled,
+            "data_cache_dir": str(tmp_path),
+        }
+        graph.propagator.get_graph_args.return_value = {
+            "stream_mode": "values",
+            "config": {"recursion_limit": 100},
+        }
+        # 让 prepare_graph_run 的真实逻辑拿到真实的记忆过滤结果
+        graph.propagator.create_initial_state.side_effect = (
+            lambda company, date, past_context="": {"past_context": past_context}
+        )
+        graph._past_context_as_of.side_effect = (
+            lambda company, date: log.get_past_context(company, as_of=date)
+        )
+        return graph, log
+
+    def test_fresh_historical_run_filters_future_memory(self, tmp_path):
+        """prepare_graph_run 以 trade_date 为 as_of：8 月决策不进 1 月分析的初始 state。"""
+        graph, log = self._fake_graph(tmp_path)
+        log.store_decision("600519", "2026-08-01", "August future decision text.")
+        log.update_with_outcome(
+            "600519", "2026-08-01", 0.20, 0.05, 5,
+            "August future lesson.", outcome_end="2026-08-10",
+        )
+
+        init_state, _, _ = TradingAgentsGraph.prepare_graph_run(
+            graph, "600519", "2026-01-15"
+        )
+
+        assert init_state is not None
+        assert "August" not in init_state["past_context"], (
+            "历史运行的初始 state 泄漏了未来记忆"
+        )
+
+        # as_of 晚于该条目时（如 2999 年）完全可见——过滤不能误伤正常注入
+        live_graph, _ = self._fake_graph(tmp_path)
+        TradingAgentsGraph.prepare_graph_run(live_graph, "600519", "2999-01-01")
+        created = live_graph.propagator.create_initial_state.call_args
+        assert "August future decision text." in created.kwargs["past_context"]
+
+    def test_resolve_pending_then_historical_run_excludes_future(self, tmp_path):
+        """历史运行触发收益回填后，刚取得的未来结果不注入当前历史运行。"""
+        graph, log = self._fake_graph(tmp_path)
+        log.store_decision("600519", "2026-08-01", "August pending decision.")
+        graph.reflector = MagicMock()
+        graph.reflector.reflect_on_final_decision.return_value = "August lesson."
+        graph._fetch_returns = MagicMock(return_value=(0.20, 0.05, 5, "2026-08-10"))
+
+        TradingAgentsGraph._resolve_pending_entries(graph, "600519")
+
+        # 回填确实完成（含时间元数据）
+        assert log.get_pending_entries() == []
+        entries = log.load_entries()
+        assert entries[0]["outcome_end"] == "2026-08-10"
+
+        # 但 as_of=2026-01-15 的历史分析读不到它
+        TradingAgentsGraph.prepare_graph_run(graph, "600519", "2026-01-15")
+        created = graph.propagator.create_initial_state.call_args
+        assert "August" not in created.kwargs["past_context"]
+
+    def _compiled_with_snapshot(self, graph, past_context):
+        """把带 past_context 快照的编译图挂到 workflow.compile() 上。
+
+        prepare_graph_run 在 checkpoint 模式下会执行
+        ``self.graph = self.workflow.compile(checkpointer=saver)``，所以快照
+        必须挂在 workflow.compile 的返回值上，直接给 graph.graph 赋值会被覆盖。
+        """
+        snapshot = MagicMock()
+        snapshot.values = {"past_context": past_context}
+        compiled = MagicMock()
+        compiled.get_state.return_value = snapshot
+        graph.workflow.compile.return_value = compiled
+        return compiled
+
+    def test_resume_refreshes_stale_past_context(self, tmp_path):
+        """恢复路径：checkpoint 里的未过滤 past_context 被重算覆盖。"""
+        graph, log = self._fake_graph(tmp_path, checkpoint_enabled=True)
+        log.store_decision("600519", "2026-08-01", "August future decision text.")
+        log.update_with_outcome(
+            "600519", "2026-08-01", 0.20, 0.05, 5,
+            "August future lesson.", outcome_end="2026-08-10",
+        )
+
+        # 模拟旧版本写入的污染 checkpoint state
+        compiled = self._compiled_with_snapshot(
+            graph, "POLLUTED: August future lesson."
+        )
+
+        with patch("tradingagents.graph.trading_graph.get_checkpointer") as mock_gc, \
+             patch("tradingagents.graph.trading_graph.checkpoint_step", return_value=7):
+            mock_gc.return_value.__enter__.return_value = MagicMock()
+            init_state, _, step = TradingAgentsGraph.prepare_graph_run(
+                graph, "600519", "2026-01-15"
+            )
+
+        assert init_state is None, "存在 checkpoint 时应走恢复路径"
+        assert step == 7
+        compiled.get_state.assert_called_once()
+        compiled.update_state.assert_called_once()
+        updated_payload = compiled.update_state.call_args.args[1]
+        assert "August" not in updated_payload["past_context"], (
+            "恢复时未按分析时点重算 past_context"
+        )
+
+    def test_resume_keeps_context_when_already_consistent(self, tmp_path):
+        """checkpoint 的 past_context 与重算一致时不做多余 update_state。"""
+        graph, log = self._fake_graph(tmp_path, checkpoint_enabled=True)
+
+        fresh_ctx = log.get_past_context("600519", as_of="2026-01-15")
+        compiled = self._compiled_with_snapshot(graph, fresh_ctx)
+
+        with patch("tradingagents.graph.trading_graph.get_checkpointer") as mock_gc, \
+             patch("tradingagents.graph.trading_graph.checkpoint_step", return_value=3):
+            mock_gc.return_value.__enter__.return_value = MagicMock()
+            TradingAgentsGraph.prepare_graph_run(graph, "600519", "2026-01-15")
+
+        compiled.update_state.assert_not_called()
+
+    def test_fetch_returns_reports_window_end_date(self):
+        """_fetch_returns 返回收益窗口的实际结束日（native 分支）。"""
+        stock_prices = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
+        bench_prices = [4000.0, 4020.0, 4040.0, 4030.0, 4050.0, 4060.0]
+        mock_graph = MagicMock(spec=TradingAgentsGraph)
+        with patch("tradingagents.dataflows.a_stock.get_astock_history_df", return_value=_native_kline_df(stock_prices)), \
+             patch("tradingagents.dataflows.index_data.get_index_history_df", return_value=_native_kline_df(bench_prices)):
+            raw, alpha, days, window_end = TradingAgentsGraph._fetch_returns(
+                mock_graph, "688017", "2026-01-05"
+            )
+        assert raw is not None
+        assert days == 5
+        # _native_kline_df 从 2026-01-05 连续 6 天 → 第 5 个交易日为 2026-01-10
+        assert window_end == "2026-01-10", (
+            "收益窗口结束日必须来自实际行情日期，而非日历推算"
+        )
 
 
 # ---------------------------------------------------------------------------

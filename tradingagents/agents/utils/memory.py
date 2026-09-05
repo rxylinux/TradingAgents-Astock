@@ -2,6 +2,7 @@
 
 from typing import List, Optional
 from pathlib import Path
+from datetime import datetime
 import re
 
 from tradingagents.agents.utils.rating import parse_rating
@@ -15,6 +16,8 @@ class TradingMemoryLog:
     # Precompiled patterns — avoids re-compilation on every load_entries() call
     _DECISION_RE = re.compile(r"DECISION:\n(.*?)(?=\nREFLECTION:|\Z)", re.DOTALL)
     _REFLECTION_RE = re.compile(r"REFLECTION:\n(.*?)$", re.DOTALL)
+    # as_of 模式下收益/复盘不可注入时的统一说明，让模型知道这不是数据遗漏
+    _OUTCOME_HIDDEN_NOTE = "（该笔收益与复盘晚于分析时点或缺乏时间元数据，未注入）"
 
     def __init__(self, config: dict = None):
         cfg = config or {}
@@ -68,20 +71,52 @@ class TradingMemoryLog:
         """Return entries with outcome:pending (for Phase B)."""
         return [e for e in self.load_entries() if e.get("pending")]
 
-    def get_past_context(self, ticker: str, n_same: int = 5, n_cross: int = 3) -> str:
-        """Return formatted past context string for agent prompt injection."""
+    def get_past_context(
+        self,
+        ticker: str,
+        n_same: int = 5,
+        n_cross: int = 3,
+        as_of: Optional[str] = None,
+    ) -> str:
+        """Return formatted past context string for agent prompt injection.
+
+        ``as_of`` is the analysis point-in-time (trade_date, interpreted as
+        *after that day's close*). When given, entries are filtered so a
+        historical analysis never reads decisions, outcomes, or reflections
+        that did not exist yet (R4):
+
+        - decision date > as_of  → entry completely hidden;
+        - outcome window end (``end=``) <= as_of → full injection;
+        - otherwise (window spans as_of, or legacy entries without time
+          metadata) → decision text only; outcome/reflection withheld —
+          unprovable information is treated as future information.
+
+        ``as_of=None`` keeps the live-analysis behaviour (everything resolved
+        so far is injectable).
+        """
         entries = [e for e in self.load_entries() if not e.get("pending")]
         if not entries:
+            return ""
+
+        as_of_date = self._parse_date(as_of) if as_of is not None else None
+        if as_of is not None and as_of_date is None:
+            # 无法确定分析时点就什么都不注入：宁可缺失记忆，不可泄漏未来
             return ""
 
         same, cross = [], []
         for e in reversed(entries):
             if len(same) >= n_same and len(cross) >= n_cross:
                 break
+            visible_outcome = True
+            if as_of_date is not None:
+                vis = self._visibility_as_of(e, as_of_date)
+                if vis == "hidden":
+                    continue
+                visible_outcome = vis == "full"
             if e["ticker"] == ticker and len(same) < n_same:
-                same.append(e)
+                same.append((e, visible_outcome))
             elif e["ticker"] != ticker and len(cross) < n_cross:
-                cross.append(e)
+                cross.append((e, visible_outcome))
 
         if not same and not cross:
             return ""
@@ -89,10 +124,10 @@ class TradingMemoryLog:
         parts = []
         if same:
             parts.append(f"Past analyses of {ticker} (most recent first):")
-            parts.extend(self._format_full(e) for e in same)
+            parts.extend(self._format_full(e, include_outcome=v) for e, v in same)
         if cross:
             parts.append("Recent cross-ticker lessons:")
-            parts.extend(self._format_reflection_only(e) for e in cross)
+            parts.extend(self._format_reflection_only(e, include_outcome=v) for e, v in cross)
         return "\n\n".join(parts)
 
     # --- Update path (Phase B) ---
@@ -105,12 +140,18 @@ class TradingMemoryLog:
         alpha_return: float,
         holding_days: int,
         reflection: str,
+        outcome_end: Optional[str] = None,
     ) -> None:
         """Replace pending tag and append REFLECTION section using atomic write.
 
         Finds the first pending entry matching (trade_date, ticker), updates
         its tag with return figures, and appends a REFLECTION section.  Uses
         a temp-file + os.replace() so a crash mid-write never corrupts the log.
+
+        ``outcome_end`` is the actual last trading date of the return window
+        (from market data, not calendar arithmetic). Together with the
+        resolution date it lets future historical analyses prove when the
+        outcome/reflection became knowable (R4).
         """
         if not self._log_path or not self._log_path.exists():
             return
@@ -141,9 +182,9 @@ class TradingMemoryLog:
                 # Parse rating from the existing pending tag
                 fields = [f.strip() for f in tag_line[1:-1].split("|")]
                 rating = fields[2]
-                new_tag = (
-                    f"[{trade_date} | {ticker} | {rating}"
-                    f" | {raw_pct} | {alpha_pct} | {holding_days}d]"
+                new_tag = self._resolved_tag(
+                    trade_date, ticker, rating, raw_pct, alpha_pct,
+                    holding_days, outcome_end,
                 )
                 rest = "\n".join(lines[1:])
                 new_blocks.append(
@@ -166,7 +207,8 @@ class TradingMemoryLog:
         """Apply multiple outcome updates in a single read + atomic write.
 
         Each element of updates must have keys: ticker, trade_date,
-        raw_return, alpha_return, holding_days, reflection.
+        raw_return, alpha_return, holding_days, reflection.  Optional key
+        ``outcome_end`` records the return window's actual end date (R4).
         """
         if not self._log_path or not self._log_path.exists() or not updates:
             return
@@ -195,9 +237,9 @@ class TradingMemoryLog:
                     rating = fields[2]
                     raw_pct = f"{upd['raw_return']:+.1%}"
                     alpha_pct = f"{upd['alpha_return']:+.1%}"
-                    new_tag = (
-                        f"[{trade_date} | {ticker} | {rating}"
-                        f" | {raw_pct} | {alpha_pct} | {upd['holding_days']}d]"
+                    new_tag = self._resolved_tag(
+                        trade_date, ticker, rating, raw_pct, alpha_pct,
+                        upd["holding_days"], upd.get("outcome_end"),
                     )
                     rest = "\n".join(lines[1:])
                     new_blocks.append(
@@ -217,6 +259,44 @@ class TradingMemoryLog:
         tmp_path.replace(self._log_path)
 
     # --- Helpers ---
+
+    @staticmethod
+    def _resolved_tag(trade_date, ticker, rating, raw_pct, alpha_pct,
+                      holding_days, outcome_end) -> str:
+        """Build a resolved tag, appending outcome time metadata when known."""
+        tag = (
+            f"[{trade_date} | {ticker} | {rating}"
+            f" | {raw_pct} | {alpha_pct} | {holding_days}d"
+        )
+        if outcome_end:
+            tag += f" | end={outcome_end}"
+        tag += f" | resolved={datetime.now().strftime('%Y-%m-%d')}"
+        return tag + "]"
+
+    @staticmethod
+    def _parse_date(value) -> Optional[object]:
+        """Parse 'YYYY-MM-DD' (optionally with time) to a date; None on failure."""
+        if not value:
+            return None
+        try:
+            return datetime.strptime(str(value).strip()[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return None
+
+    def _visibility_as_of(self, entry: dict, as_of_date) -> str:
+        """Classify an entry's injectability at an analysis point-in-time.
+
+        Returns "full" (decision + outcome + reflection provably knowable),
+        "decision_only" (decision knowable, outcome/reflection not provable),
+        or "hidden" (decision itself postdates the analysis).
+        """
+        decision_date = self._parse_date(entry.get("date"))
+        if decision_date is None or decision_date > as_of_date:
+            return "hidden"
+        outcome_end = self._parse_date(entry.get("outcome_end"))
+        if outcome_end is not None and outcome_end <= as_of_date:
+            return "full"
+        return "decision_only"
 
     def _apply_rotation(self, blocks: List[str]) -> List[str]:
         """Drop oldest resolved blocks when their count exceeds max_entries.
@@ -273,7 +353,16 @@ class TradingMemoryLog:
             "raw": fields[3] if fields[3] != "pending" else None,
             "alpha": fields[4] if len(fields) > 4 else None,
             "holding": fields[5] if len(fields) > 5 else None,
+            # R4 时间元数据：end=收益窗口实际结束日，resolved=回填发生日。
+            # 旧格式条目两者皆为 None —— as_of 模式按保守规则处理。
+            "outcome_end": None,
+            "resolved_at": None,
         }
+        for field in fields[6:]:
+            if field.startswith("end="):
+                entry["outcome_end"] = field[len("end="):]
+            elif field.startswith("resolved="):
+                entry["resolved_at"] = field[len("resolved="):]
         body = "\n".join(lines[1:]).strip()
         decision_match = self._DECISION_RE.search(body)
         reflection_match = self._REFLECTION_RE.search(body)
@@ -281,17 +370,32 @@ class TradingMemoryLog:
         entry["reflection"] = reflection_match.group(1).strip() if reflection_match else ""
         return entry
 
-    def _format_full(self, e: dict) -> str:
+    def _format_full(self, e: dict, include_outcome: bool = True) -> str:
+        if not include_outcome:
+            tag = f"[{e['date']} | {e['ticker']} | {e['rating']}]"
+            return (
+                f"{tag}\nDECISION:\n{e['decision']}\n{self._OUTCOME_HIDDEN_NOTE}"
+            )
         raw = e["raw"] or "n/a"
         alpha = e["alpha"] or "n/a"
         holding = e["holding"] or "n/a"
-        tag = f"[{e['date']} | {e['ticker']} | {e['rating']} | {raw} | {alpha} | {holding}]"
+        meta = ""
+        if e.get("outcome_end"):
+            meta = f" | end={e['outcome_end']}"
+        tag = f"[{e['date']} | {e['ticker']} | {e['rating']} | {raw} | {alpha} | {holding}{meta}]"
         parts = [tag, f"DECISION:\n{e['decision']}"]
         if e["reflection"]:
             parts.append(f"REFLECTION:\n{e['reflection']}")
         return "\n\n".join(parts)
 
-    def _format_reflection_only(self, e: dict) -> str:
+    def _format_reflection_only(self, e: dict, include_outcome: bool = True) -> str:
+        if not include_outcome:
+            text = e["decision"][:300]
+            suffix = "..." if len(e["decision"]) > 300 else ""
+            return (
+                f"[{e['date']} | {e['ticker']} | {e['rating']}]\n{text}{suffix}\n"
+                f"{self._OUTCOME_HIDDEN_NOTE}"
+            )
         tag = f"[{e['date']} | {e['ticker']} | {e['rating']} | {e['raw'] or 'n/a'}]"
         if e["reflection"]:
             return f"{tag}\n{e['reflection']}"
