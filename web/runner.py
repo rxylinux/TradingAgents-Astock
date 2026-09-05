@@ -59,6 +59,23 @@ _KNOWN_TOOL_AGENT_MAP = {
     "get_insider_transactions": "lockup",
 }
 
+# 分析师工具循环运行在按角色隔离的消息通道（{role}_messages）上，共享
+# messages 通道只剩初始输入。进度检测必须扫描分支通道才能看到工具调用。
+_BRANCH_MESSAGE_KEYS = [f"{role}_messages" for role in _ANALYST_NODE_MAP.values()]
+
+
+def _recent_messages_from_state(chunk: dict[str, Any]) -> list[Any]:
+    """Collect recent messages from the shared channel and all branch channels."""
+    msgs: list[Any] = []
+    shared = chunk.get("messages", [])
+    if isinstance(shared, (list, tuple)):
+        msgs.extend(shared[-5:])
+    for key in _BRANCH_MESSAGE_KEYS:
+        branch = chunk.get(key)
+        if isinstance(branch, (list, tuple)) and branch:
+            msgs.extend(branch[-5:])
+    return msgs
+
 
 def _extract_tools_from_messages(messages: Any) -> list[str]:
     """Extract tool names from message list or object."""
@@ -117,14 +134,19 @@ def _detect_completed_stages(
             if tracker.get_agent_status(aid) not in ("done", "error"):
                 tracker.set_agent_status(aid, "running", "正在分析数据与生成报告...")
                 if isinstance(node_output, dict):
-                    msgs = node_output.get("messages", [])
-                    for tool_name in _extract_tools_from_messages(msgs):
+                    branch_msgs = node_output.get(
+                        f"{aid}_messages", node_output.get("messages", [])
+                    )
+                    for tool_name in _extract_tools_from_messages(branch_msgs):
                         tracker.record_agent_tool(aid, tool_name)
         elif node_name in _TOOL_NODE_MAP:
             aid = _TOOL_NODE_MAP[node_name]
             tools = []
             if isinstance(node_output, dict):
-                tools = _extract_tools_from_messages(node_output.get("messages", []))
+                branch_msgs = node_output.get(
+                    f"{aid}_messages", node_output.get("messages", [])
+                )
+                tools = _extract_tools_from_messages(branch_msgs)
             elif isinstance(node_output, list):
                 tools = _extract_tools_from_messages(node_output)
 
@@ -134,11 +156,10 @@ def _detect_completed_stages(
             elif tracker.get_agent_status(aid) != "done":
                 tracker.set_agent_status(aid, "tool_calling", "正在执行工具查询...")
 
-    # 2. 检查 messages（LangGraph values 模式）
-    messages = chunk.get("messages", [])
-    if isinstance(messages, (list, tuple)) and messages:
-        recent_msgs = messages[-5:]
-        for msg in recent_msgs:
+    # 2. 检查 messages（LangGraph values 模式；分析师工具循环在分支通道上）
+    recent_all = _recent_messages_from_state(chunk)
+    if recent_all:
+        for msg in recent_all:
             name = getattr(msg, "name", None) or (isinstance(msg, dict) and msg.get("name"))
             if name and str(name) in _KNOWN_TOOL_AGENT_MAP:
                 aid = _KNOWN_TOOL_AGENT_MAP[str(name)]

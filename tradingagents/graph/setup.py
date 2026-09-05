@@ -23,6 +23,58 @@ ROLE_KEYS = (
 )
 
 
+def _branch_messages_key(role: str) -> str:
+    return f"{role}_messages"
+
+
+def _branch_isolated_analyst_node(role: str, node_fn):
+    """Wrap an analyst node so its LLM loop runs on a branch-private channel.
+
+    The node keeps reading/writing the ``messages`` key as before; the wrapper
+    feeds it only this branch's messages (``{role}_messages``) and publishes
+    its output back to that channel. Without this isolation the parallel
+    branches share one ``messages`` channel, and the shared ToolNode executes
+    whichever branch's AIMessage happens to be last — cross-branch tool
+    requests/responses get mismatched (R1).
+    """
+
+    key = _branch_messages_key(role)
+
+    def wrapped(state):
+        branch_state = dict(state)
+        branch_state["messages"] = state.get(key) or []
+        out = node_fn(branch_state) or {}
+        result = dict(out)
+        msgs = result.pop("messages", None)
+        if msgs is not None:
+            result[key] = msgs
+        return result
+
+    return wrapped
+
+
+def _branch_isolated_tool_node(role: str, tool_node):
+    """Wrap a ToolNode so it executes on this branch's private channel.
+
+    The ToolNode itself stays stock (no ``messages_key`` needed); the wrapper
+    maps ``{role}_messages`` in/out, so tool requests and responses pair up
+    per branch and per ``tool_call_id``.
+    """
+
+    key = _branch_messages_key(role)
+
+    def wrapped(state):
+        branch_state = dict(state)
+        branch_state["messages"] = state.get(key) or []
+        out = tool_node.invoke(branch_state)
+        msgs = out.get("messages") if isinstance(out, dict) else None
+        if msgs is None:
+            return {}
+        return {key: msgs}
+
+    return wrapped
+
+
 class GraphSetup:
     """Handles the setup and configuration of the agent graph."""
 
@@ -141,13 +193,21 @@ class GraphSetup:
         # Create workflow
         workflow = StateGraph(AgentState)
 
-        # Add analyst nodes to the graph
+        # Add analyst nodes to the graph. Analyst LLM loops and tool nodes are
+        # wrapped onto branch-private message channels (R1) so parallel
+        # branches cannot see or execute each other's tool calls.
         for analyst_type, node in analyst_nodes.items():
-            workflow.add_node(f"{analyst_type.capitalize()} Analyst", node)
+            workflow.add_node(
+                f"{analyst_type.capitalize()} Analyst",
+                _branch_isolated_analyst_node(analyst_type, node),
+            )
             workflow.add_node(
                 f"Msg Clear {analyst_type.capitalize()}", delete_nodes[analyst_type]
             )
-            workflow.add_node(f"tools_{analyst_type}", tool_nodes[analyst_type])
+            workflow.add_node(
+                f"tools_{analyst_type}",
+                _branch_isolated_tool_node(analyst_type, tool_nodes[analyst_type]),
+            )
 
         # Add quality gate + other nodes
         workflow.add_node("Quality Gate", quality_gate_node)
@@ -165,20 +225,28 @@ class GraphSetup:
         for analyst_type in selected_analysts:
             current_analyst = f"{analyst_type.capitalize()} Analyst"
             current_tools = f"tools_{analyst_type}"
-            current_clear = f"Msg Clear {analyst_type.capitalize()}"
 
             workflow.add_edge(START, current_analyst)
 
-            # Add conditional edges for current analyst
+            # Add conditional edges for current analyst (routed on the
+            # branch-private message channel, see ConditionalLogic)
             workflow.add_conditional_edges(
                 current_analyst,
                 getattr(self.conditional_logic, f"should_continue_{analyst_type}"),
-                [current_tools, current_clear],
+                [current_tools, f"Msg Clear {analyst_type.capitalize()}"],
             )
             workflow.add_edge(current_tools, current_analyst)
 
-            # Connect each Msg Clear to Quality Gate (join/fan-in)
-            workflow.add_edge(current_clear, "Quality Gate")
+        # R2: real join barrier before Quality Gate. Adding one edge per branch
+        # inside the loop is OR semantics — the first finishing branch would
+        # start the quality gate (and downstream) early, and later branches
+        # would re-trigger it, running the debate pipeline twice in one run.
+        # The list form waits for every selected analyst's completion node.
+        barrier_sources = [
+            f"Msg Clear {analyst_type.capitalize()}"
+            for analyst_type in dict.fromkeys(selected_analysts)
+        ]
+        workflow.add_edge(barrier_sources, "Quality Gate")
 
         workflow.add_edge("Quality Gate", "Bull Researcher")
 

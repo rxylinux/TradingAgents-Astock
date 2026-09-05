@@ -49,11 +49,14 @@ from tradingagents.agents.utils.agent_utils import (
 )
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
-from .conditional_logic import ConditionalLogic
+from .conditional_logic import BRANCH_MESSAGE_KEYS, ConditionalLogic
 from .setup import ROLE_KEYS, GraphSetup
 from .propagation import Propagator
 from .reflection import Reflector
 from .signal_processing import SignalProcessor
+
+# 分析师分支消息通道名（R1 隔离）：debug 流式输出与状态读取需要遍历它们。
+_ANALYST_MESSAGE_KEYS = tuple(BRANCH_MESSAGE_KEYS.values())
 
 # 七个分析师角色——它们受 `selected_analysts` 控制，没选中就不会进图。
 _ANALYST_ROLES = frozenset({
@@ -740,14 +743,22 @@ class TradingAgentsGraph:
 
         try:
             if self.debug:
-                trace = []
+                final_state = None
+                # 分析师工具循环的消息在按角色隔离的分支通道上（R1），
+                # debug 输出改为增量打印各通道新消息；共享 messages 通道
+                # 只保留初始输入，不再驱动打印。
+                printed = {}
                 for chunk in self.graph.stream(init_agent_state, **args):
-                    if len(chunk["messages"]) == 0:
-                        pass
-                    else:
-                        chunk["messages"][-1].pretty_print()
-                        trace.append(chunk)
-                final_state = trace[-1]
+                    final_state = chunk
+                    for key in ("messages", *_ANALYST_MESSAGE_KEYS):
+                        msgs = chunk.get(key) or []
+                        start = printed.get(key, 0)
+                        for m in msgs[start:]:
+                            m.pretty_print()
+                        if len(msgs) > start:
+                            printed[key] = len(msgs)
+                if final_state is None:
+                    final_state = self.graph.get_state(args.get("config", {})).values
             else:
                 final_state = self.graph.invoke(init_agent_state, **args)
 

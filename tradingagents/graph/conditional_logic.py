@@ -2,6 +2,18 @@
 
 from tradingagents.agents.utils.agent_states import AgentState
 
+# 各分析师工具循环读取的分支消息通道（R1 隔离）：条件路由必须与分析师节点、
+# 工具节点看到同一份消息，否则路由判断的是别的分支的输出。
+BRANCH_MESSAGE_KEYS = {
+    "market": "market_messages",
+    "social": "social_messages",
+    "news": "news_messages",
+    "fundamentals": "fundamentals_messages",
+    "policy": "policy_messages",
+    "hot_money": "hot_money_messages",
+    "lockup": "lockup_messages",
+}
+
 
 class ConditionalLogic:
     """Handles conditional logic for determining graph flow."""
@@ -17,75 +29,48 @@ class ConditionalLogic:
         self.max_risk_discuss_rounds = max_risk_discuss_rounds
         self.enable_early_stopping = enable_early_stopping
 
-    def should_continue_market(self, state: AgentState):
-        """Determine if market analysis should continue."""
-        messages = state.get("messages", [])
+    def _should_continue_branch(self, state: AgentState, role: str) -> str:
+        """Route one analyst branch on its own message channel.
+
+        The last message is produced by this branch's own LLM loop (isolated
+        via ``{role}_messages``), so a tool_calls marker here can only belong
+        to this branch.
+        """
+        messages = state.get(BRANCH_MESSAGE_KEYS[role], [])
         if not messages:
-            return "Msg Clear Market"
+            return f"Msg Clear {role.capitalize()}"
         last_message = messages[-1]
         if getattr(last_message, "tool_calls", None):
-            return "tools_market"
-        return "Msg Clear Market"
+            return f"tools_{role}"
+        return f"Msg Clear {role.capitalize()}"
+
+    def should_continue_market(self, state: AgentState):
+        """Determine if market analysis should continue."""
+        return self._should_continue_branch(state, "market")
 
     def should_continue_social(self, state: AgentState):
         """Determine if social media analysis should continue."""
-        messages = state.get("messages", [])
-        if not messages:
-            return "Msg Clear Social"
-        last_message = messages[-1]
-        if getattr(last_message, "tool_calls", None):
-            return "tools_social"
-        return "Msg Clear Social"
+        return self._should_continue_branch(state, "social")
 
     def should_continue_news(self, state: AgentState):
         """Determine if news analysis should continue."""
-        messages = state.get("messages", [])
-        if not messages:
-            return "Msg Clear News"
-        last_message = messages[-1]
-        if getattr(last_message, "tool_calls", None):
-            return "tools_news"
-        return "Msg Clear News"
+        return self._should_continue_branch(state, "news")
 
     def should_continue_fundamentals(self, state: AgentState):
         """Determine if fundamentals analysis should continue."""
-        messages = state.get("messages", [])
-        if not messages:
-            return "Msg Clear Fundamentals"
-        last_message = messages[-1]
-        if getattr(last_message, "tool_calls", None):
-            return "tools_fundamentals"
-        return "Msg Clear Fundamentals"
+        return self._should_continue_branch(state, "fundamentals")
 
     def should_continue_policy(self, state: AgentState):
         """Determine if policy analysis should continue."""
-        messages = state.get("messages", [])
-        if not messages:
-            return "Msg Clear Policy"
-        last_message = messages[-1]
-        if getattr(last_message, "tool_calls", None):
-            return "tools_policy"
-        return "Msg Clear Policy"
+        return self._should_continue_branch(state, "policy")
 
     def should_continue_hot_money(self, state: AgentState):
         """Determine if hot money tracking should continue."""
-        messages = state.get("messages", [])
-        if not messages:
-            return "Msg Clear Hot_money"
-        last_message = messages[-1]
-        if getattr(last_message, "tool_calls", None):
-            return "tools_hot_money"
-        return "Msg Clear Hot_money"
+        return self._should_continue_branch(state, "hot_money")
 
     def should_continue_lockup(self, state: AgentState):
         """Determine if lockup/reduction analysis should continue."""
-        messages = state.get("messages", [])
-        if not messages:
-            return "Msg Clear Lockup"
-        last_message = messages[-1]
-        if getattr(last_message, "tool_calls", None):
-            return "tools_lockup"
-        return "Msg Clear Lockup"
+        return self._should_continue_branch(state, "lockup")
 
     def should_continue_debate(self, state: AgentState) -> str:
         """Determine if debate should continue."""

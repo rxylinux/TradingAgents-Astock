@@ -1,6 +1,6 @@
 from typing import Annotated
 from typing_extensions import TypedDict
-from langgraph.graph import MessagesState
+from langgraph.graph import MessagesState, add_messages
 
 
 # Researcher team state
@@ -48,6 +48,18 @@ class AgentState(MessagesState):
     trade_date: Annotated[str, "What date we are trading at"]
 
     sender: Annotated[str, "Agent that sent this message"]
+
+    # 每个分析师分支独占的工具循环消息通道（R1 隔离）。并行分支若共享单一
+    # ``messages`` 通道，ToolNode 会读到其他分支的 AIMessage 并按它执行工具，
+    # 造成工具请求/响应错配与 "not a valid tool" 错误。分析师节点、条件路由
+    # 与工具节点（由 GraphSetup 统一包装）全程一致使用 ``{role}_messages``。
+    market_messages: Annotated[list, add_messages]
+    social_messages: Annotated[list, add_messages]
+    news_messages: Annotated[list, add_messages]
+    fundamentals_messages: Annotated[list, add_messages]
+    policy_messages: Annotated[list, add_messages]
+    hot_money_messages: Annotated[list, add_messages]
+    lockup_messages: Annotated[list, add_messages]
 
     # research step
     market_report: Annotated[str, "Report from the Market Analyst"]
