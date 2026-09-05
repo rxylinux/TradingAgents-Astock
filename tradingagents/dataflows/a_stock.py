@@ -576,7 +576,13 @@ def _eastmoney_datacenter(
     sort_columns: str = "",
     sort_types: str = "-1",
 ) -> list[dict]:
-    """东财数据中心统一查询 — 龙虎榜/解禁 共用 (具备自动重试与兜底)."""
+    """东财数据中心统一查询 — 龙虎榜/解禁 共用（自动重试，失败向上传播）。
+
+    返回 ``[]`` 只表示**查询成功但没有记录**。网络/HTTP 失败与供应商业务
+    错误（JSON 可解析但 ``success=false`` 或无 ``result`` 载荷）在重试耗尽
+    后抛出异常，由调用方转换为 ``[数据缺失]`` 提示——不能与"没有事件"混同，
+    否则接口故障会被下游解释成确定性的无风险结论（R3）。
+    """
     params = {
         "reportName": report_name,
         "columns": columns,
@@ -592,19 +598,27 @@ def _eastmoney_datacenter(
     def _fetch():
         r = _em_get(_DATACENTER_URL, params=params, timeout=15)
         d = r.json()
-        if d.get("result") and d["result"].get("data"):
-            return d["result"]["data"]
-        return []
+        if not isinstance(d, dict):
+            raise ValueError(f"unexpected payload type: {type(d).__name__}")
+        if d.get("success") is False:
+            raise ValueError(f"vendor business error: {d.get('message', 'unknown')}")
+        result = d.get("result")
+        if result is None:
+            if d.get("success") is True:
+                return []  # 查询成功但无记录
+            raise ValueError("response has neither result payload nor success=true")
+        data = result.get("data")
+        if data is None:
+            return []
+        if not isinstance(data, list):
+            raise ValueError(f"unexpected data payload type: {type(data).__name__}")
+        return data
 
-    try:
-        return robust_api_call(
-            _fetch,
-            max_retries=2,
-            fallback_value=[],
-            error_log_prefix=f"Eastmoney datacenter query failed for {report_name}",
-        )
-    except Exception:
-        return []
+    return robust_api_call(
+        _fetch,
+        max_retries=2,
+        error_log_prefix=f"Eastmoney datacenter query failed for {report_name}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2262,6 +2276,7 @@ def get_dragon_tiger_board(
     lines = [f"# 龙虎榜数据 | {code} | {trade_date} (近{look_back_days}日)"]
 
     # 1. 上榜记录 — eastmoney datacenter direct HTTP
+    data = []
     try:
         data = _eastmoney_datacenter(
             "RPT_DAILYBILLBOARD_DETAILSNEW",
@@ -2289,9 +2304,13 @@ def get_dragon_tiger_board(
                     f"| {turnover:.2f}%"
                 )
     except Exception as e:
-        lines.append(f"龙虎榜列表查询失败: {e}")
+        # 请求失败 ≠ 未上榜：显式标注数据缺失，让分析师与质量门控知道
+        # 这是"不知道"，而不是"确认没有"。
+        lines.append(f"\n[数据缺失: 龙虎榜查询失败] {e}")
 
     # 2. 最近上榜的买卖席位 — eastmoney datacenter direct HTTP
+    buy_data = []
+    sell_data = []
     try:
         if data:
             latest_date = str(data[0].get("TRADE_DATE", ""))[:10]
@@ -2336,8 +2355,10 @@ def get_dragon_tiger_board(
                         f"  {row.get('OPERATEDEPT_NAME', '')} "
                         f"| {buy_amt:.0f} | {sell_amt:.0f} | {net:.0f}"
                     )
-    except Exception:
-        pass
+    except Exception as e:
+        # 席位明细是补充信息：主列表已成功时仅标注该部分缺失，不丢已确认数据
+        if data:
+            lines.append(f"\n[数据缺失: 席位明细查询失败] {e}")
 
     # 3. 机构动向 — 从买卖席位明细筛选机构专用席位 (OPERATEDEPT_CODE="0")
     try:
@@ -2409,7 +2430,8 @@ def get_lockup_expiry(
         else:
             lines.append("\n无历史解禁记录。")
     except Exception as e:
-        lines.append(f"个股解禁查询失败: {e}")
+        # 请求失败 ≠ 无记录：显式标注数据缺失，避免"无历史解禁"被当成事实
+        lines.append(f"\n[数据缺失: 历史解禁查询失败] {e}")
 
     # 2. 未来待解禁 — eastmoney datacenter direct HTTP
     try:
@@ -2440,7 +2462,7 @@ def get_lockup_expiry(
         else:
             lines.append(f"\n未来 {forward_days} 天无待解禁。")
     except Exception as e:
-        lines.append(f"解禁日历查询失败: {e}")
+        lines.append(f"\n[数据缺失: 解禁日历查询失败] {e}")
 
     return "\n".join(lines)
 

@@ -122,6 +122,35 @@ class DiskCache:
 _MEM_CACHE = TTLCache(maxsize=1000, default_ttl=1800.0)  # 30 minutes memory cache
 _DISK_CACHE = DiskCache()
 
+# 缓存格式版本（R5）：v2 起失败输出不再写入任何一层缓存。磁盘命名空间带
+# 版本后缀，旧版本写入的污染条目（错误字符串）留在原命名空间，天然不再被
+# 读取——不删除用户已有缓存文件，升级后自动失效。
+CACHE_SCHEMA_VERSION = 2
+
+# 已知失败输出标记。数据层工具会把请求失败转换为这些字符串（而不是抛异常
+# 或返回 None），仅凭 ``result is not None`` 判定可缓存会把它们连同 24 小时
+# 磁盘 TTL 一起持久化，数据源恢复后仍返回旧错误。新增失败文案时必须同步
+# 此处；读取时也用它做二次验证，兜住绕过写入口的污染条目。
+_FAILURE_OUTPUT_MARKERS = (
+    "[数据缺失",  # 数据层统一的请求失败/数据缺失标记（R3 起）
+    "Error retrieving",  # 财报三表（Sina）失败前缀
+    "查询失败",  # 旧版中文失败文案（用于识别历史污染条目）
+)
+
+
+def _is_failure_output(result: Any) -> bool:
+    """True if a function result is a failure/error string rather than data.
+
+    Success-but-empty outputs (e.g. ``"No data found for stock 600519"``) are
+    NOT failures: the query succeeded, caching them avoids hammering the
+    vendor for stocks that simply have no records.
+    """
+    return isinstance(result, str) and any(m in result for m in _FAILURE_OUTPUT_MARKERS)
+
+
+def _versioned_namespace(namespace: str) -> str:
+    return f"{namespace}-v{CACHE_SCHEMA_VERSION}"
+
 
 def cached_data(
     namespace: str,
@@ -129,32 +158,47 @@ def cached_data(
     use_disk: bool = True,
     max_disk_age: Optional[float] = 86400.0,  # 24 hours default for disk
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
-    """Decorator to cache function results in Memory LRU and optional Disk."""
+    """Decorator to cache function results in Memory LRU and optional Disk.
+
+    Failure outputs (see ``_FAILURE_OUTPUT_MARKERS``) are never cached in
+    either tier, so a transient outage cannot shadow a recovering data source
+    for hours; successful results — including success-but-empty — are cached
+    with the configured TTLs.
+    """
 
     def decorator(fn: Callable[..., T]) -> Callable[..., T]:
+        disk_ns = _versioned_namespace(namespace)
+
         def wrapper(*args, **kwargs) -> T:
             # Build cache key from function arguments
             key_raw = f"{fn.__name__}:{args}:{sorted(kwargs.items())}"
-            # 1. Check memory cache
+            # 1. Check memory cache (guard against failure strings anyway)
             cached_val = _MEM_CACHE.get(key_raw)
-            if cached_val is not None:
+            if cached_val is not None and not _is_failure_output(cached_val):
                 return cached_val
 
             # 2. Check disk cache
             if use_disk:
-                disk_val = _DISK_CACHE.get(namespace, key_raw, max_age_seconds=max_disk_age)
+                disk_val = _DISK_CACHE.get(disk_ns, key_raw, max_age_seconds=max_disk_age)
                 if disk_val is not None:
-                    _MEM_CACHE.set(key_raw, disk_val, ttl=ttl_seconds)
-                    return disk_val
+                    if _is_failure_output(disk_val):
+                        # 污染条目按 miss 处理，让本次调用重新取数
+                        logger.warning(
+                            "Ignoring polluted cache entry for %s (failure output)",
+                            key_raw,
+                        )
+                    else:
+                        _MEM_CACHE.set(key_raw, disk_val, ttl=ttl_seconds)
+                        return disk_val
 
             # 3. Call underlying function
             result = fn(*args, **kwargs)
 
-            # 4. Save to caches if valid
-            if result is not None:
+            # 4. Save to caches only if it is real data
+            if result is not None and not _is_failure_output(result):
                 _MEM_CACHE.set(key_raw, result, ttl=ttl_seconds)
                 if use_disk and isinstance(result, (str, dict, list, int, float, bool)):
-                    _DISK_CACHE.set(namespace, key_raw, result)
+                    _DISK_CACHE.set(disk_ns, key_raw, result)
 
             return result
 
