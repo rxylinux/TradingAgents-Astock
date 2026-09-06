@@ -21,28 +21,124 @@ _INCOMPLETE_TASKS_LOCK = threading.Lock()
 
 
 def _results_dir() -> Path:
-    return Path.home() / ".tradingagents" / "logs"
+    """A12: 历史列表与写入端共用同一配置源。
+
+    写入端（``TradingAgentsGraph._log_state``）落在运行配置的 results_dir
+    （``TRADINGAGENTS_RESULTS_DIR`` 环境变量优先，见 DEFAULT_CONFIG）；
+    读取端固定扫 ``~/.tradingagents/logs`` 会让自定义输出目录里的报告从
+    不出现在历史列表。这里读取 DEFAULT_CONFIG 当前值，与环境变量/默认
+    目录的优先级保持一致。
+    """
+    return Path(DEFAULT_CONFIG["results_dir"])
 
 
-def get_history() -> list[dict[str, str]]:
+_LOG_NAME_RE = re.compile(r"full_states_log_(\d{4}-\d{2}-\d{2})\.json$")
+
+
+_READ_ERROR = object()  # 哨兵：文件不可解析（调用方应整条跳过）
+
+
+def _read_run_info(path: Path):
+    """读取报告 JSON 的 (run_id, created_at)。
+
+    返回 ``(None, None)`` 表示可解析但没有运行档案（旧报告）；返回
+    ``_READ_ERROR`` 表示文件畸形——调用方**整条跳过**（不以目录名伪装身
+    份入列），记 warning 诊断，不拖垮整个历史列表（N02）。
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except UnicodeDecodeError as e:
+        logger.warning("历史记录 %s 非法 UTF-8（已跳过）: %s", path, e)
+        return _READ_ERROR
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("历史记录 %s 无法解析（已跳过）: %s", path, e)
+        return _READ_ERROR
+    if not isinstance(data, dict):
+        logger.warning("历史记录 %s 结构异常（已跳过）", path)
+        return _READ_ERROR
+    meta = data.get("run_metadata")
+    run_id = None
+    created_at = None
+    if isinstance(meta, dict):
+        run_id = meta.get("run_id")
+        created_at = meta.get("created_at")
+    return run_id, created_at
+
+
+def get_history() -> list[dict[str, Any]]:
     """Scan saved analysis logs and return a sorted list (newest first).
 
-    Each entry: {"ticker": "300750", "date": "2026-05-12", "path": "/abs/path/...json"}
+    N02: 同时扫描版本存档（``_runs/<run_id>/<ticker>/…``，同日多次运行
+    各自保留）与最新兼容入口（``<ticker>/…``）。同一 run_id 的版本文件
+    与兼容文件在列表只显示一次（优先版本路径——身份完整）；旧的无
+    metadata 报告继续可见。
+
+    Each entry: {"ticker", "date", "path", "run_id", "created_at"}；
+    旧报告 run_id/created_at 为空串。排序：date 降序，同日按 created_at
+    降序（无时间者排最后）。
     """
     root = _results_dir()
     if not root.exists():
         return []
 
-    entries: list[dict[str, str]] = []
-    for log_file in root.rglob("full_states_log_*.json"):
-        match = re.search(r"full_states_log_(\d{4}-\d{2}-\d{2})\.json$", log_file.name)
+    entries: list[dict[str, Any]] = []
+    seen_keys: set[tuple] = set()
+
+    def _add(log_file: Path, ticker: str, date: str, run_id, created_at, prefer: bool):
+        # 去重键：有 run_id 按 run_id（兼容文件与版本文件同 run 只显示一次，
+        # 版本路径优先——先加入者优先）；旧文件按规范化路径。
+        key = ("run", str(run_id)) if run_id else ("path", str(log_file))
+        if key in seen_keys:
+            return
+        seen_keys.add(key)
+        entries.append({
+            "ticker": ticker,
+            "date": date,
+            "path": str(log_file),
+            "run_id": str(run_id or ""),
+            "created_at": str(created_at or ""),
+        })
+
+    # 1) 版本存档：_runs/<run_id>/<ticker>/TradingAgentsStrategy_logs/…
+    runs_root = root / "_runs"
+    if runs_root.exists():
+        for log_file in sorted(runs_root.glob("*/*/TradingAgentsStrategy_logs/full_states_log_*.json")):
+            match = _LOG_NAME_RE.search(log_file.name)
+            if not match:
+                continue
+            date = match.group(1)
+            run_id = log_file.parents[2].name
+            ticker = log_file.parents[1].name
+            info = _read_run_info(log_file)
+            if info is _READ_ERROR:
+                continue  # 畸形文件：整条跳过（不以目录名伪装身份）
+            rid_from_meta, created_at = info
+            # 身份以文件内容为准；目录名与内容不一致时以内容为主并告警
+            if rid_from_meta and rid_from_meta != run_id:
+                logger.warning(
+                    "版本目录 run_id=%s 与报告内容 run_id=%s 不一致（%s）",
+                    run_id, rid_from_meta, log_file,
+                )
+            _add(log_file, ticker, date, rid_from_meta or run_id, created_at, prefer=True)
+
+    # 2) 最新兼容入口：<ticker>/TradingAgentsStrategy_logs/…（不进入 _runs）
+    for log_file in sorted(root.glob("*/TradingAgentsStrategy_logs/full_states_log_*.json")):
+        match = _LOG_NAME_RE.search(log_file.name)
         if not match:
             continue
         date = match.group(1)
         ticker = log_file.parent.parent.name
-        entries.append({"ticker": ticker, "date": date, "path": str(log_file)})
+        info = _read_run_info(log_file)
+        if info is _READ_ERROR:
+            continue
+        run_id, created_at = info
+        _add(log_file, ticker, date, run_id, created_at, prefer=False)
 
-    entries.sort(key=lambda e: e["date"], reverse=True)
+    entries.sort(
+        key=lambda e: (e["date"], e.get("created_at") or ""),
+        reverse=True,
+    )
     return entries
 
 
@@ -64,7 +160,7 @@ def _load_incomplete_index() -> list[dict[str, Any]]:
     try:
         with open(_INCOMPLETE_TASKS_FILE, encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except (UnicodeDecodeError, OSError, json.JSONDecodeError):
         return []
 
     if not isinstance(data, list):
@@ -193,7 +289,17 @@ def clear_incomplete_task(ticker: str, trade_date: str) -> None:
 
 
 def get_incomplete_history() -> list[dict[str, Any]]:
-    """Return unfinished tasks that can be resumed from their checkpoint."""
+    """Return unfinished tasks that can be resumed from their checkpoint.
+
+    A11: 同标的同日期的**旧完成报告**不得隐藏/删除新失败任务的恢复入口
+    ——fresh 重跑只清断点与索引、不删旧报告，旧报告的存在不能证明"这一
+    次"运行已完成。区分依据是**断点存在性**（本次运行身份的可恢复证据）：
+
+    - 有有效断点 → 保留（新失败任务可从断点续跑，无论旧报告是否存在）；
+    - 无断点且已有完成报告 → 旧条目对应的运行确实完成过（或断点已被成功
+      收尾清理），作为陈旧条目过滤；
+    - 无断点也无报告 → 保留（展示失败原因；无恢复点但信息本身有用）。
+    """
     completed = _completed_keys()
     active_entries: list[dict[str, Any]] = []
 
@@ -201,11 +307,11 @@ def get_incomplete_history() -> list[dict[str, Any]]:
         entries = _load_incomplete_index()
         for entry in entries:
             key = _completed_key(entry["ticker"], entry["trade_date"])
-            if key in completed:
-                continue
 
             step = _checkpoint_step(entry["ticker"], entry["trade_date"])
             entry["checkpoint_step"] = step
+            if step is None and key in completed:
+                continue
             active_entries.append(entry)
 
         active_entries.sort(key=lambda e: float(e.get("updated_at", 0)), reverse=True)

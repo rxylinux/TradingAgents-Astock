@@ -649,6 +649,11 @@ def _collect_sections(
     """
     sections: list[tuple[str, str]] = []
 
+    # N01: 结构化质量卡置顶（Web/MD/PDF 同一渲染；旧报告显示未记录）
+    from tradingagents.agents.report_quality import render_quality_card_md
+
+    sections.append(("报告质量卡", render_quality_card_md(final_state.get("data_quality"))))
+
     for key, title in _REPORT_SECTIONS:
         content = final_state.get(key, "")
         if content:
@@ -672,7 +677,10 @@ def _collect_sections(
                 text = normalize_stock_mentions(text, ticker, final_state)
             sections.append(("多空辩论", text))
 
-    trader_decision = final_state.get("trader_investment_decision", "")
+    # A14: 共享字段访问器——与 Web 展示、统一 JSON 同一取值规则
+    from web.report_fields import trader_plan
+
+    trader_decision = trader_plan(final_state) or ""
     if trader_decision:
         text = _strip_think(str(trader_decision))
         if ticker:
@@ -708,6 +716,16 @@ def _collect_sections(
         if ticker:
             text = normalize_stock_mentions(text, ticker, final_state)
         sections.append(("最终决策", text))
+
+    # A14: 质量门控结论随导出（历史重载与实时同一字段，经共享访问器）
+    from web.report_fields import quality_summary
+
+    dqs = quality_summary(final_state)
+    if dqs:
+        text = _strip_think(str(dqs))
+        if ticker:
+            text = normalize_stock_mentions(text, ticker, final_state)
+        sections.append(("数据质量评估", text))
 
     return sections
 

@@ -89,3 +89,12 @@ class AgentState(MessagesState):
     ]
     final_trade_decision: Annotated[str, "Final decision made by the Risk Analysts"]
     past_context: Annotated[str, "Memory log context injected at run start (same-ticker decisions + cross-ticker lessons)"]
+    # A10: 本次启用且适用的分析师集合（质量门控只检查这些角色；未启用
+    # 角色不计失败、不进提示词）。运行入口初始化，恢复路径随 checkpoint。
+    selected_analysts: Annotated[list, "Analyst roles active in this run"]
+    # N01: 结构化报告质量卡（JSON 可序列化；复用质量门控硬检查，单一评级
+    # 来源）。旧 state 无此字段 → 兼容原行为（unknown，不凭空生成通过）。
+    data_quality: Annotated[dict, "Structured report-completeness card (N01)"]
+    # N02: 本次运行的身份与公开配置档案。SQLite 恢复保留原 ID/配置/时间；
+    # 旧断点缺失时标示未记录，不得以恢复时配置伪装原配置。
+    run_metadata: Annotated[dict, "Run identity and public config profile (N02)"]

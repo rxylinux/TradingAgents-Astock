@@ -23,7 +23,12 @@ from tradingagents.default_config import DEFAULT_CONFIG  # noqa: E402
 from web.components.progress_panel import render_progress  # noqa: E402
 from web.components.report_viewer import render_report  # noqa: E402
 from web.components.sidebar import render_sidebar  # noqa: E402
-from web.history import clear_incomplete_task, extract_signal, load_analysis  # noqa: E402
+from web.history import (  # noqa: E402
+    clear_incomplete_task,
+    extract_signal,
+    get_history,
+    load_analysis,
+)
 from web.progress import ProgressTracker  # noqa: E402
 from web.runner import run_analysis_in_thread  # noqa: E402
 
@@ -159,7 +164,20 @@ st.markdown(
 
 # ── Build config ─────────────────────────────────────────────────────────────
 
-def _build_config() -> dict:
+def _build_config(run_request: dict | None = None) -> dict:
+    """Build the config for ONE run.
+
+    A09: 分析类型必须来自**本次任务请求**（恢复任务的 start_req 携带正确
+    的 analysis_type——指数断点可能撞上侧栏当前的个股选择，反之亦然），
+    而不是侧栏 session_state。``run_request=None`` 时回退到模块级 start_req
+    （本脚本的顶层请求变量），再回退侧栏状态——同一份返回值同时驱动进度
+    阶段与后台图，调用方不得再次无参调用读不同状态。
+    """
+    request = run_request if run_request is not None else globals().get("start_req")
+    analysis_type = (
+        (request or {}).get("analysis_type")
+        or st.session_state.get("analysis_type", "个股")
+    )
     config = DEFAULT_CONFIG.copy()
     config["llm_provider"] = st.session_state.get("llm_provider", DEFAULT_CONFIG.get("llm_provider", "glm"))
     config["deep_think_llm"] = st.session_state.get("deep_think_llm", DEFAULT_CONFIG.get("deep_think_llm", "glm-5.3"))
@@ -180,14 +198,18 @@ def _build_config() -> dict:
     config["max_risk_discuss_rounds"] = 1
     config["checkpoint_enabled"] = True
     config["output_language"] = "Chinese"
-    # 分析类型：指数走指数图（指数版分析师/辩论/决策 prompt），个股=原行为
-    config["instrument_type"] = (
-        "index" if st.session_state.get("analysis_type") == "指数" else "stock"
-    )
-    config["selected_analysts"] = st.session_state.get(
-        "selected_analysts",
-        ["market", "social", "news", "fundamentals", "policy", "hot_money", "lockup"],
-    )
+    # 分析类型：指数走指数图（指数版分析师/辩论/决策 prompt），个股=原行为。
+    # A09: 类型来自本次任务请求；指数模式的分析师集合统一为指数预设
+    # （fundamentals/lockup 不适用），后台图与进度阶段使用同一份配置。
+    if analysis_type == "指数":
+        config["instrument_type"] = "index"
+        config["selected_analysts"] = ["market", "social", "news", "policy", "hot_money"]
+    else:
+        config["instrument_type"] = "stock"
+        config["selected_analysts"] = st.session_state.get(
+            "selected_analysts",
+            ["market", "social", "news", "fundamentals", "policy", "hot_money", "lockup"],
+        )
     # Optional: route nodes through a personal Claude Pro/Max subscription (Agent
     # SDK). Scope: "deep" = Research/Portfolio only; "all" = + the 7 analysts.
     # Leaving the fallback keys None makes the graph fall back to the
@@ -253,16 +275,19 @@ if start_req:
             start_req["trade_date"],
         )
 
-    # 动态构建本次运行的 stage_ids
+    # A09: 本次运行只构建一份配置——进度阶段与后台图由同一 run_config
+    # 决定（类型/分析师集合来自任务请求，而非侧栏当前状态）。
+    run_config = _build_config(start_req)
+
     from web.progress import PIPELINE_STAGES
 
-    if a_type == "指数":
+    if run_config["instrument_type"] == "index":
         stage_ids = [
             s["id"] for s in PIPELINE_STAGES
             if s["id"] not in ("fundamentals", "lockup")
         ]
     else:
-        selected = _build_config().get("selected_analysts") or [
+        selected = run_config.get("selected_analysts") or [
             "market", "social", "news", "fundamentals", "policy", "hot_money", "lockup"
         ]
         downstream = {"quality_gate", "debate", "trader", "risk", "pm"}
@@ -281,7 +306,7 @@ if start_req:
     run_analysis_in_thread(
         ticker=start_req["ticker"],
         trade_date=start_req["trade_date"],
-        config=_build_config(),
+        config=run_config,
         tracker=tracker,
     )
     st.rerun()
@@ -291,15 +316,112 @@ if start_req:
 
 tracker: ProgressTracker | None = st.session_state.get("tracker")
 viewing_history: str | None = st.session_state.get("viewing_history")
+comparing = st.session_state.get("comparing_history")
+
+# State C: Compare two historical reports（N03；仅非运行期提供入口）
+if comparing and not (tracker and tracker.is_running):
+    from tradingagents.report_comparison import (
+        MismatchedReportsError,
+        compare_reports,
+        render_comparison_markdown,
+    )
+
+    st.markdown("## 🔄 历史报告对比")
+    rows = get_history()
+    if len(rows) < 2:
+        st.warning("需要至少两份历史报告才能比较。")
+        if st.button("← 返回", key="cmp_back_insufficient"):
+            st.session_state.pop("comparing_history", None)
+            st.rerun()
+    else:
+        # Codex 退回 #5/#6：身份用稳定路径（而非列表索引）；结果绑定生成
+        # 时的两份身份——选择变化/同一份/错误时清空旧结果与下载。
+        path_list = [r["path"] for r in rows]
+
+        def _label_for(path_str):
+            for r in rows:
+                if r["path"] == path_str:
+                    rid = r.get("run_id", "")[:8] or "旧"
+                    return f"{r['ticker']} · {r['date']} · {rid}"
+            return path_str.rsplit("/", 1)[-1]
+
+        col_l, col_r, col_go = st.columns([2, 2, 1])
+        with col_l:
+            sel_l = st.selectbox("左侧报告", path_list,
+                                 format_func=_label_for,
+                                 key="cmp_select_left")
+        with col_r:
+            sel_r = st.selectbox("右侧报告", path_list,
+                                 index=1 if len(path_list) > 1 else 0,
+                                 format_func=_label_for,
+                                 key="cmp_select_right")
+        with col_go:
+            st.markdown("<div style='height: 1.6rem;'></div>", unsafe_allow_html=True)
+            run_cmp = st.button("对比", key="cmp_run_button", type="primary")
+
+        if st.button("← 返回单份报告", key="cmp_back_button"):
+            st.session_state.pop("comparing_history", None)
+            st.session_state.pop("cmp_result_md", None)
+            st.session_state.pop("cmp_identity", None)
+            st.rerun()
+
+        current_identity = (sel_l, sel_r)
+        stored_identity = st.session_state.get("cmp_identity")
+        if stored_identity is not None and stored_identity != current_identity:
+            st.session_state.pop("cmp_result_md", None)
+
+        if run_cmp:
+            if sel_l == sel_r:
+                st.session_state.pop("cmp_result_md", None)
+                st.session_state.pop("cmp_identity", None)
+                st.error("请选择两份不同的报告。")
+            else:
+                try:
+                    left = load_analysis(sel_l)
+                    right = load_analysis(sel_r)
+                    comparison = compare_reports(left, right)
+                    st.session_state["cmp_result_md"] = render_comparison_markdown(comparison)
+                    st.session_state["cmp_identity"] = current_identity
+                except MismatchedReportsError as e:
+                    st.session_state.pop("cmp_result_md", None)
+                    st.session_state.pop("cmp_identity", None)
+                    st.error(f"不可比较: {e}")
+                except Exception as exc:  # noqa: BLE001 — 对比失败不崩页面
+                    st.session_state.pop("cmp_result_md", None)
+                    st.session_state.pop("cmp_identity", None)
+                    st.error(f"比较失败: {exc}")
+
+        md = st.session_state.get("cmp_result_md")
+        identity_ok = st.session_state.get("cmp_identity") == current_identity
+        if md and identity_ok:
+            st.markdown(md)
+            st.download_button(
+                "⬇️ 下载对比 Markdown",
+                data=md,
+                file_name="report_comparison.md",
+                mime="text/markdown",
+                key="cmp_download_button",
+            )
+        elif md and not identity_ok:
+            st.info("报告选择已改变，请重新点击「对比」查看新结果。")
 
 # State 1: Viewing a historical analysis
-if viewing_history:
+elif viewing_history:
     try:
         state = load_analysis(viewing_history)
         signal = extract_signal(state)
         ticker = Path(viewing_history).parent.parent.name
         trade_date = Path(viewing_history).stem.replace("full_states_log_", "")
         render_report(state, ticker, trade_date, signal)
+        # Codex 退回 #5：历史报告页可进入对比（从当前报告出发）；
+        # 分析运行期间 disabled（与对比状态区一致，不与使用文档承诺冲突）
+        if st.button(
+            "🔄 对比两份历史报告",
+            key="open_compare_from_history",
+            disabled=bool(tracker and tracker.is_running),
+        ):
+            st.session_state["comparing_history"] = True
+            st.rerun()
     except Exception as exc:
         st.error(f"加载失败: {exc}")
 
@@ -349,6 +471,12 @@ elif st.session_state.get("fundflow_report"):
 
 # State 0: Idle — welcome screen
 else:
+    from web.history import get_history as _gh
+
+    _hist_rows = _gh()
+    if len(_hist_rows) >= 2 and st.button("🔄 对比两份历史报告", key="open_compare_idle"):
+        st.session_state["comparing_history"] = True
+        st.rerun()
     st.markdown(
         """<div style="text-align: center; margin-top: 1.5rem; margin-bottom: 2rem;">
 <div style="font-size: 3rem; margin-bottom: 0.5rem;">📈</div>

@@ -22,6 +22,10 @@ class FakeResp:
     def json(self):
         return self._payload
 
+    def raise_for_status(self):
+        """2xx 假响应：HTTP 状态验证直接通过（F1 起 _fetch 会调用它）。"""
+        return None
+
 
 def _ok_response(rows):
     """东财 datacenter 正常响应（success=true，可能无记录）。"""
@@ -78,12 +82,41 @@ def test_lockup_http_error_shows_data_missing(isolated_cache, no_retry_sleep, mo
         def json(self):
             raise ValueError("Expecting value: line 1 column 1 (char 0)")
 
+        def raise_for_status(self):
+            return None
+
     monkeypatch.setattr(a_stock, "_em_get", lambda *a, **k: BadJson())
 
     out = a_stock.get_lockup_expiry("600519", "2026-09-04")
 
     assert "[数据缺失" in out
     assert "无待解禁" not in out
+
+
+def test_lockup_http_500_status_shows_data_missing(isolated_cache, no_retry_sleep, monkeypatch):
+    """真实 HTTP 5xx（响应体可为任意内容）：必须按失败处理，不能当成功解析。
+
+    F1 复审指出原 "HTTP error" 测试只验证 JSON 解析失败；网关错误页也可能是
+    可解析 JSON，二者不能等同。
+    """
+
+    class ServerError:
+        status_code = 502
+
+        def raise_for_status(self):
+            raise a_stock._requests.HTTPError("502 Server Error: bad gateway")
+
+        def json(self):
+            # 网关错误页也可能带可解析 JSON —— 不因可解析就当成功
+            return {"success": True, "result": {"data": [{"FREE_DATE": "2099-01-01"}]}}
+
+    monkeypatch.setattr(a_stock, "_em_get", lambda *a, **k: ServerError())
+
+    out = a_stock.get_lockup_expiry("600519", "2026-09-04")
+
+    assert "[数据缺失" in out, "HTTP 5xx 必须按请求失败处理"
+    assert "无待解禁" not in out
+    assert "2099-01-01" not in out, "HTTP 失败响应体里的载荷不得被采信"
 
 
 def test_lockup_vendor_business_error_shows_data_missing(isolated_cache, no_retry_sleep, monkeypatch):
@@ -271,3 +304,59 @@ def test_quality_gate_flags_missing_data_marker():
         f"含 [数据缺失] 标记的报告不应评 A，实际 {grade}: {detail}"
     )
     assert "数据缺失" in detail
+
+
+# ---------------------------------------------------------------------------
+# F1：新浪财报从真实 HTTP 边界的失败/空数据语义
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_sina_business_error_propagates_not_empty(monkeypatch, tmp_path):
+    """F1：新浪业务失败（status.code != 0）从真实 HTTP 边界传播为失败输出。"""
+    monkeypatch.setattr(cache_utils, "_MEM_CACHE", TTLCache(maxsize=100, default_ttl=60))
+    monkeypatch.setattr(
+        cache_utils, "_DISK_CACHE", DiskCache(cache_dir=str(tmp_path / "dc"))
+    )
+
+    class BizError:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"result": {"status": {"code": 1002, "msg": "paperCode invalid"}}}
+
+    monkeypatch.setattr(a_stock._requests, "get", lambda *a, **k: BizError())
+
+    out = a_stock.get_balance_sheet("600519", curr_date="2026-09-04")
+
+    assert out.startswith("Error retrieving balance sheet"), out
+    assert "No " not in out, "业务失败不得伪装成成功空数据"
+
+
+@pytest.mark.integration
+def test_sina_success_empty_report_is_legitimate_empty(monkeypatch, tmp_path):
+    """F1：确认成功但无报表（code=0 无条目）时，"No data" 是合法空结果且可缓存。"""
+    monkeypatch.setattr(cache_utils, "_MEM_CACHE", TTLCache(maxsize=100, default_ttl=60))
+    monkeypatch.setattr(
+        cache_utils, "_DISK_CACHE", DiskCache(cache_dir=str(tmp_path / "dc"))
+    )
+
+    calls = {"n": 0}
+
+    class OkEmpty:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            calls["n"] += 1
+            return {"result": {"status": {"code": 0}, "data": {"fzb": []}}}
+
+    monkeypatch.setattr(a_stock._requests, "get", lambda *a, **k: OkEmpty())
+
+    first = a_stock.get_balance_sheet("600519", curr_date="2026-09-04")
+    second = a_stock.get_balance_sheet("600519", curr_date="2026-09-04")
+
+    assert "No balance sheet data found" in first
+    assert calls["n"] == 1, "合法空结果应命中缓存（与故障输出行为不同）"
+    assert second == first

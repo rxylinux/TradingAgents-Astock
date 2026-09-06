@@ -87,7 +87,11 @@ cli = ["static/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["tests"]
+# 默认回归入口同时收集 tests 与 docs 下的独立审计脚本（原样引用，不复制）：
+# 八份 docs/audit_*.py 共 71 例与单元/集成回归一次跑完，防止只跑旧测试
+# 漏掉审计边界。python_files 限定前缀，docs 下的其他材料不会被误收集。
+testpaths = ["tests", "docs"]
+python_files = ["test_*.py", "audit_*.py"]
 addopts = "-ra --strict-markers"
 markers = [
     "unit: fast isolated unit tests",

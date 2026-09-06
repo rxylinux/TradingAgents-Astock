@@ -37,6 +37,8 @@ def get_sector_fund_flow_rank(fs_type: str = "m:90+t:2", top_n: int = 10) -> str
         "fields": "f12,f14,f3,f62,f184,f204,f205",
     }
     kind = "行业" if "t:2" in fs_type else "概念"
+    # A03：排名只有实时快照。调用方（gather_market_flow_data）对历史分析日
+    # 附加快照警告；直接调用时是"今天"的视角，保持原行为。
     try:
         r = _em_get(url, params=params, timeout=15)
         items = r.json().get("data", {}).get("diff", [])
@@ -71,8 +73,18 @@ def get_sector_fund_flow_rank(fs_type: str = "m:90+t:2", top_n: int = 10) -> str
 def gather_market_flow_data(
     index_id: str = "000001.SH", curr_date: str = ""
 ) -> str:
-    """聚合全部市场级资金数据为一段原始素材（供 LLM 整合）。"""
-    from .dataflows.a_stock import get_hot_stocks, get_northbound_flow
+    """聚合全部市场级资金数据为一段原始素材（供 LLM 整合）。
+
+    A03：历史分析日下，板块资金流排名（行业/概念）只有实时快照——数据保留
+    供参考，但前置禁止引用警告，不得当作分析日当天的事实；北向与行业排名
+    的时点防护在各自数据函数内完成。
+    """
+    from .dataflows.a_stock import (
+        _is_historical,
+        _snapshot_notice,
+        get_hot_stocks,
+        get_northbound_flow,
+    )
     from .dataflows.index_data import get_index_fund_flow, get_index_news
     from .dataflows.index_registry import parse_index_ticker
 
@@ -88,6 +100,12 @@ def gather_market_flow_data(
 
     start_str = (start - timedelta(days=7)).strftime("%Y-%m-%d")
 
+    sector_notice = (
+        _snapshot_notice(curr_date, "行业/概念板块资金流排名")
+        if _is_historical(curr_date)
+        else ""
+    )
+
     parts = [
         f"# 大盘资金流原始数据 · {spec.name} ({spec.ticker}) · {curr_date}",
         "",
@@ -95,9 +113,9 @@ def gather_market_flow_data(
         "",
         get_northbound_flow(curr_date, include_history=True),
         "",
-        get_sector_fund_flow_rank("m:90+t:2", top_n=10),
+        sector_notice + get_sector_fund_flow_rank("m:90+t:2", top_n=10),
         "",
-        get_sector_fund_flow_rank("m:90+t:3", top_n=8),
+        sector_notice + get_sector_fund_flow_rank("m:90+t:3", top_n=8),
         "",
         get_hot_stocks(curr_date),
         "",

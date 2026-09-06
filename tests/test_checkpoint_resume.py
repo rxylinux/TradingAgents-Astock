@@ -163,6 +163,11 @@ class TestCheckpointResume(unittest.TestCase):
             "data_cache_dir": self.tmpdir,
         }
         fake_graph.workflow = builder
+        fake_graph.run_context = lambda: __import__("contextlib").nullcontext()
+        import types as _t
+        fake_graph._prepare_graph_run = _t.MethodType(
+            TradingAgentsGraph._prepare_graph_run, fake_graph
+        )
         fake_graph._checkpointer_ctx = None
         fake_graph.propagator.get_graph_args.return_value = {
             "stream_mode": "values",

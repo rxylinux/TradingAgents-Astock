@@ -172,6 +172,11 @@ _PROVIDER_CONFIG = {
     "minimax": ("https://api.minimax.chat/v1", "MINIMAX_API_KEY"),
 }
 
+# GLM 专属默认端点（A02）：智谱 Coding 计划。项目默认模型（glm-5.3/glm-5.2）
+# 属于该套餐；仅当 provider=glm 且用户未显式配置 base_url 时采用，
+# GLM_API_BASE_URL 可覆盖。其他供应商一律使用各自的官方端点。
+_GLM_CODING_DEFAULT_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
+
 
 class OpenAIClient(BaseLLMClient):
     """Client for OpenAI, Ollama, OpenRouter, and xAI providers.
@@ -227,6 +232,12 @@ class OpenAIClient(BaseLLMClient):
         # provider default so users can route through their own gateway.
         elif self.provider in _PROVIDER_CONFIG:
             default_base, api_key_env = _PROVIDER_CONFIG[self.provider]
+            if self.provider == "glm" and not self.base_url:
+                # GLM 专属默认（A02）：未显式配置端点的 glm 走 Coding 计划
+                # 端点，GLM_API_BASE_URL 可覆盖；显式 base_url 仍最优先。
+                default_base = (
+                    os.getenv("GLM_API_BASE_URL") or _GLM_CODING_DEFAULT_URL
+                )
             llm_kwargs["base_url"] = self.base_url or default_base
             if api_key_env:
                 api_key = os.environ.get(api_key_env)

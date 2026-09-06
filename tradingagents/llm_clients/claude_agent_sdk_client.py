@@ -26,6 +26,7 @@ LangGraph treats the analyst as done. On failure/quota the fallback provider's
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -236,17 +237,25 @@ def _run_async(coro):
     running loop and ``asyncio.run`` works. If a loop is already running, run
     the coroutine on a dedicated thread with its own loop so we never disturb
     the caller's loop.
+
+    A05: ``threading.Thread`` does NOT propagate contextvars — the run-level
+    config snapshot (and any other context) would be lost in the worker,
+    including the ``asyncio.to_thread`` hop the SDK tool handlers use. Capture
+    the caller's context and run the loop inside ``ctx.run`` so the whole
+    bridge (new loop thread → to_thread worker → LangChain tool) observes the
+    calling run's configuration.
     """
+    caller_context = contextvars.copy_context()
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(coro)
+        return caller_context.run(asyncio.run, coro)
 
     box: dict[str, Any] = {}
 
     def _worker():
         try:
-            box["value"] = asyncio.run(coro)
+            box["value"] = caller_context.run(asyncio.run, coro)
         except BaseException as exc:  # propagate to the calling thread, don't swallow
             box["error"] = exc
 
@@ -442,10 +451,17 @@ class ClaudeAgentSDKClient(BaseLLMClient):
                        output_format: Optional[dict] = None,
                        sdk_tools: Optional[list] = None,
                        tool_names: Optional[list] = None):
+        # A15: ``allowed_tools`` 只是**自动批准**列表——未列出的工具依然存在，
+        # 在 ``bypassPermissions`` 下内置 Bash/Read/Write/Edit 照样会被批准执行。
+        # ``tools`` 才界定 agent 可用的工具集合：固定传 ``[]`` 显式移除全部
+        # 内置工具。三条路径（纯文本 / 结构化 output_format / 投研工具循环）
+        # 都经此构造：前两者没有任何工具；工具循环节点也只能使用下方
+        # ``mcp_servers`` 注册的投研 MCP 工具，不能触碰子进程的文件/命令。
         opts: dict[str, Any] = {
             "model": self.model,
             "max_turns": 1,           # approximate a single completion
-            "allowed_tools": [],      # no built-in tools (Read/Write/Bash/…)
+            "tools": [],              # disable ALL built-in tools (Bash/Read/Write/Edit/…)
+            "allowed_tools": [],      # nothing auto-approved beyond the MCP allowlist below
             "setting_sources": [],    # don't load filesystem settings/skills/CLAUDE.md
             "permission_mode": "bypassPermissions",
         }
@@ -465,7 +481,8 @@ class ClaudeAgentSDKClient(BaseLLMClient):
             opts["env"] = env
         if sdk_tools:
             # Register the bridged analyst tools and let the SDK run the loop
-            # internally over multiple turns (only these tools are allowed).
+            # internally over multiple turns. Built-ins stay disabled via
+            # ``tools=[]`` above: the loop may ONLY call these MCP tools.
             server = create_sdk_mcp_server(_MCP_SERVER_NAME, "1.0.0", tools=sdk_tools)
             opts["mcp_servers"] = {_MCP_SERVER_NAME: server}
             opts["allowed_tools"] = [

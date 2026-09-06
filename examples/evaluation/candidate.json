@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "submission_id": "candidate-model-b",
+  "suite_id": "demo-contracts",
+  "suite_version": "1",
+  "suite_digest": "067557baa2d08b5e3e47a97fa9775846fa95b0bf4f20cd912cceed4c62020211",
+  "runs": [
+    {
+      "case_id": "stock_complete",
+      "trial_id": 1,
+      "status": "completed",
+      "report_path": "reports/sc_t1.json"
+    },
+    {
+      "case_id": "stock_complete",
+      "trial_id": 2,
+      "status": "completed",
+      "report_path": "reports/sc_t2.json",
+      "observations": {
+        "latency_ms": 1200,
+        "cost_amount": 0.008,
+        "cost_currency": "USD"
+      }
+    },
+    {
+      "case_id": "stock_limited",
+      "trial_id": 1,
+      "status": "completed",
+      "report_path": "reports/sl_t1.json"
+    },
+    {
+      "case_id": "stock_limited",
+      "trial_id": 2,
+      "status": "completed",
+      "report_path": "reports/sl_t1.json"
+    },
+    {
+      "case_id": "stock_insufficient",
+      "trial_id": 1,
+      "status": "completed",
+      "report_path": "reports/si_t1.json"
+    },
+    {
+      "case_id": "stock_insufficient",
+      "trial_id": 2,
+      "status": "completed",
+      "report_path": "reports/si_t1.json"
+    },
+    {
+      "case_id": "index_normal",
+      "trial_id": 1,
+      "status": "completed",
+      "report_path": "reports/idx_t1.json",
+      "observations": {
+        "latency_ms": 1600,
+        "cost_amount": 0.012,
+        "cost_currency": "USD"
+      }
+    },
+    {
+      "case_id": "index_normal",
+      "trial_id": 2,
+      "status": "failed"
+    },
+    {
+      "case_id": "stock_legacy",
+      "trial_id": 1,
+      "status": "completed",
+      "report_path": "reports/legacy_t1.json"
+    },
+    {
+      "case_id": "stock_legacy",
+      "trial_id": 2,
+      "status": "completed",
+      "report_path": "reports/legacy_t2.json"
+    },
+    {
+      "case_id": "stock_negative",
+      "trial_id": 1,
+      "status": "completed",
+      "report_path": "reports/neg_t1.json"
+    },
+    {
+      "case_id": "stock_negative",
+      "trial_id": 2,
+      "status": "completed",
+      "report_path": "reports/neg_t2.json"
+    }
+  ]
+}

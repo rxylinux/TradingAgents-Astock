@@ -1,0 +1,45 @@
+{
+  "messages": [
+    [
+      "human",
+      "601899"
+    ]
+  ],
+  "selected_analysts": [
+    "market"
+  ],
+  "company_of_interest": "601899",
+  "trade_date": "2026-01-15",
+  "past_context": "",
+  "investment_debate_state": {
+    "bull_history": "",
+    "bear_history": "",
+    "history": "",
+    "current_response": "",
+    "judge_decision": "",
+    "count": 0
+  },
+  "risk_debate_state": {
+    "aggressive_history": "",
+    "conservative_history": "",
+    "neutral_history": "",
+    "history": "",
+    "latest_speaker": "",
+    "current_aggressive_response": "",
+    "current_conservative_response": "",
+    "current_neutral_response": "",
+    "judge_decision": "",
+    "count": 0
+  },
+  "market_report": "演示营业收入为42单位，同比增长18%，环比增长5%。毛利率45.2%，研发投入占比12.3%。资产负债率28.5%。演示营业收入为42单位，同比增长18%，环比增长5%。毛利率45.2%，研发投入占比12.3%。资产负债率28.5%。演示营业收入为42单位，同比增长18%，环比增长5%。毛利率45.2%，研发投入占比12.3%。资产负债率28.5%。演示营业收入为42单位，同比增长18%，环比增长5%。毛利率45.2%，研发投入占比12.3%。资产负债率28.5%。演示营业收入为42单位，同比增长18%，环比增长5%。毛利率45.2%，研发投入占比12.3%。资产负债率28.5%。演示营业收入为42单位，同比增长18%，环比增长5%。毛利率45.2%，研发投入占比12.3%。资产负债率28.5%。演示营业收入为42单位，同比增长18%，环比增长5%。毛利率45.2%，研发投入占比12.3%。资产负债率28.5%。演示营业收入为42单位，同比增长18%，环比增长5%。毛利率45.2%，研发投入占比12.3%。资产负债率28.5%。\n| 指标 | 值 |\n|---|---|\n| 营收 | 42单位 |",
+  "fundamentals_report": "",
+  "sentiment_report": "",
+  "news_report": "",
+  "policy_report": "",
+  "hot_money_report": "",
+  "lockup_report": "",
+  "data_quality_summary": "## 数据质量门控结果\n\n**标的**: 601899 | **交易日**: 2026-01-15 | **参与分析师**: 1 位\n\n### 硬检查结果\n- 技术分析师: [A] 完整 (507 chars)\n\n### LLM 复审\nreviewed\n",
+  "final_trade_decision": "Rating: Buy\n基于完整分析，建议持有。",
+  "trader_investment_plan": "分批建仓",
+  "trader_investment_decision": "分批建仓"
+}

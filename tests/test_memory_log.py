@@ -6,9 +6,21 @@ import pytest
 import pandas as pd
 from unittest.mock import MagicMock, patch
 
+from langchain_core.messages import AIMessage
+from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode
+
 from tradingagents.agents.utils.memory import TradingMemoryLog
+from tradingagents.agents.utils.agent_states import AgentState
 from tradingagents.agents.schemas import PortfolioDecision, PortfolioRating
+from tradingagents.graph.checkpointer import (
+    get_checkpointer,
+    has_checkpoint,
+    thread_id,
+)
+from tradingagents.graph.conditional_logic import ConditionalLogic
 from tradingagents.graph.reflection import Reflector
+from tradingagents.graph.setup import GraphSetup
 from tradingagents.graph.trading_graph import (
     TradingAgentsGraph,
     _normalize_yfinance_ticker,
@@ -60,9 +72,14 @@ def _resolve_entry(log, ticker, date, decision, reflection="Good call."):
     log.update_with_outcome(ticker, date, 0.05, 0.02, 5, reflection)
 
 
-def _price_df(prices):
-    """Minimal DataFrame matching yfinance .history() output shape."""
-    return pd.DataFrame({"Close": prices})
+def _price_df(prices, start_date="2026-01-05"):
+    """Minimal DataFrame matching yfinance .history() output shape.
+
+    yfinance 的 history() 以 DatetimeIndex 返回（A07 起收益计算按索引日期
+    对齐股票与基准，fixture 需具备与真实输出一致的形状）。
+    """
+    dates = pd.date_range(start=start_date, periods=len(prices), freq="D")
+    return pd.DataFrame({"Close": prices}, index=dates)
 
 
 def _native_kline_df(prices, start_date="2026-01-05"):
@@ -484,13 +501,24 @@ class TestDeferredReflection:
         assert msft["ticker"] == "MSFT" and msft["pending"] is True
 
     def test_update_atomic_write(self, tmp_path):
-        """A pre-existing .tmp file is overwritten; the log is correctly updated."""
+        """原子写：唯一临时文件（pid+tid 后缀）写后即被 replace，无残留。
+
+        A06 起 .tmp.{pid}.{tid} 的唯一命名取代固定 .tmp——stale 的固定名
+        文件不再被触碰（也不与新事务冲突）；断言相应改为「事务自身不遗留
+        临时文件 + 更新正确」。
+        """
         log = make_log(tmp_path)
         log.store_decision("NVDA", "2026-01-10", DECISION_BUY)
         stale_tmp = tmp_path / "trading_memory.tmp"
         stale_tmp.write_text("GARBAGE CONTENT — should be overwritten", encoding="utf-8")
         log.update_with_outcome("NVDA", "2026-01-10", 0.042, 0.021, 5, "Correct.")
-        assert not stale_tmp.exists()
+        leftovers = [
+            p for p in tmp_path.iterdir()
+            if p.name.startswith("trading_memory.tmp")
+            and p.suffix not in ("", ".md", ".lock")
+            and ".tmp." in p.name
+        ]
+        assert not leftovers, f"事务遗留了临时文件: {leftovers}"
         entries = log.load_entries()
         assert len(entries) == 1
         assert entries[0]["reflection"] == "Correct."
@@ -624,15 +652,19 @@ class TestDeferredReflection:
         assert raw is None and alpha is None and days is None and window_end is None
 
     def test_fetch_returns_benchmark_shorter_than_stock(self):
-        """CSI 300 having fewer rows than the stock must not raise IndexError."""
+        """A07/A08：基准缺少对齐端点 → 全 None 保持 pending，绝不缩短窗口。
+
+        旧行为（min() 缩短到 2 日并立即结算）已按审核 A07/A08 修正为正确
+        行为：目标证券窗口已满 5 日，但基准在结束日（2026-01-10）无数据，
+        无法按相同日期对齐 → 保持 pending。
+        """
         stock_prices = [100.0, 102.0, 104.0, 103.0, 105.0, 106.0]
         bench_prices = [4000.0, 4020.0, 4030.0]
         mock_graph = MagicMock(spec=TradingAgentsGraph)
         with patch("tradingagents.dataflows.a_stock.get_astock_history_df", return_value=_native_kline_df(stock_prices)), \
              patch("tradingagents.dataflows.index_data.get_index_history_df", return_value=_native_kline_df(bench_prices)):
             raw, alpha, days, window_end = TradingAgentsGraph._fetch_returns(mock_graph, "688017", "2026-01-05")
-        assert raw is not None and alpha is not None and days is not None
-        assert days == 2
+        assert raw is None and alpha is None and days is None and window_end is None
 
     def test_fetch_returns_index_graph_switches_benchmark_for_csi300(self):
         """Index graph analyzing 000300.SH uses 000001.SH as benchmark."""
@@ -1003,6 +1035,56 @@ class TestAsOfContextFiltering:
         assert "end=2026-01-12" in raw
         assert "resolved=2026-01-20" in raw
 
+    def test_outcome_visible_but_late_reflection_withheld(self, tmp_path):
+        """F3：收益窗口已结束（end ≤ as_of）但复盘晚生成（resolved > as_of）。
+
+        收益数字是当时已可知的市场事实，可以注入；复盘文本是后来才写的
+        经验总结，不得回溯注入到更早的分析日期。
+        """
+        log = make_log(tmp_path)
+        self._seed_resolved(
+            tmp_path, "600519", "2026-01-01", "January decision.",
+            "SEPTEMBER_GENERATED_LESSON",
+            end="2026-01-08", resolved="2026-09-05",
+        )
+
+        ctx = log.get_past_context("600519", as_of="2026-01-15")
+
+        assert "January decision." in ctx, "决策可见"
+        assert "+20.0%" in ctx, "收益窗口已在 as_of 前结束，收益数字可见"
+        assert "SEPTEMBER_GENERATED_LESSON" not in ctx, "晚生成的复盘泄漏"
+        assert "复盘生成时间晚于分析时点" in ctx, "应注明复盘为何缺失"
+
+    def test_reflection_visible_only_after_resolved_date(self, tmp_path):
+        """F3：resolved ≤ as_of 时复盘才完整注入（跨过回填日即可见）。"""
+        log = make_log(tmp_path)
+        self._seed_resolved(
+            tmp_path, "600519", "2026-01-01", "January decision.",
+            "EARLY_GENERATED_LESSON",
+            end="2026-01-08", resolved="2026-01-10",
+        )
+
+        ctx = log.get_past_context("600519", as_of="2026-01-15")
+
+        assert "EARLY_GENERATED_LESSON" in ctx
+        assert "REFLECTION:" in ctx
+
+    def test_cross_ticker_late_reflection_also_withheld(self, tmp_path):
+        """F3：跨标的经验同样按复盘生成时间过滤。"""
+        log = make_log(tmp_path)
+        self._seed_resolved(
+            tmp_path, "000858", "2026-01-01", "Cross decision.",
+            "CROSS_SEPTEMBER_LESSON",
+            end="2026-01-08", resolved="2026-09-05",
+        )
+
+        ctx = log.get_past_context("600519", as_of="2026-01-15")
+
+        assert "CROSS_SEPTEMBER_LESSON" not in ctx, "跨标的晚生成复盘泄漏"
+        # 收益窗口已结束：跨标的 tag 中的收益数字可见，复盘被注明剔除
+        assert "+20.0%" in ctx
+        assert "复盘生成时间晚于分析时点" in ctx
+
     def test_as_of_accepts_datetime_like_string(self, tmp_path):
         """带时分秒的 as_of（如 "2026-01-15 15:30:00"）同样被识别。"""
         log = make_log(tmp_path)
@@ -1015,8 +1097,40 @@ class TestAsOfContextFiltering:
 
 
 # ---------------------------------------------------------------------------
-# R4: 图运行入口的时点边界（prepare_graph_run / 回填 / 恢复路径）
+# R4/F4/F5: 图运行入口的时点边界（真实 SQLite 断点恢复路径）
 # ---------------------------------------------------------------------------
+
+
+
+def _nullcontext():
+    from contextlib import nullcontext
+
+    return nullcontext()
+
+def _checkpoint_runner(tmp_path, workflow):
+    """构造仅含恢复路径所需属性的真实方法 runner（不经过 __init__）。"""
+    from tradingagents.graph.checkpointer import get_checkpointer  # noqa: F401
+
+    runner = TradingAgentsGraph.__new__(TradingAgentsGraph)
+    runner.config = {"checkpoint_enabled": True, "data_cache_dir": str(tmp_path)}
+    runner.workflow = workflow
+    # A10 恢复检查：__new__ 桩不带 selected_analysts → 生产侧归入
+    # 「无法验证」边界放行（真实 __init__ 必设非空集合）。
+    runner.propagator = Propagator()
+    runner.memory_log = TradingMemoryLog(
+        {"memory_log_path": str(tmp_path / "memory.md")}
+    )
+    runner._resolve_pending_entries = MagicMock()
+    runner._checkpointer_ctx = None
+    return runner
+
+
+def _is_refusal(error) -> bool:
+    import re as _re
+    return bool(_re.search(
+        r"不兼容|incompatible|unsafe|cannot safely|无法安全|拒绝恢复|需要重新开始",
+        str(error), _re.IGNORECASE,
+    ))
 
 
 class TestPointInTimeGraphIntegration:
@@ -1039,10 +1153,26 @@ class TestPointInTimeGraphIntegration:
         }
         # 让 prepare_graph_run 的真实逻辑拿到真实的记忆过滤结果
         graph.propagator.create_initial_state.side_effect = (
-            lambda company, date, past_context="": {"past_context": past_context}
+            lambda company, date, past_context="", selected_analysts=None: {"past_context": past_context}
         )
         graph._past_context_as_of.side_effect = (
             lambda company, date: log.get_past_context(company, as_of=date)
+        )
+        # F5 之后恢复安全检查是实例方法；mock 上必须指回真实实现，
+        # 否则整段检查会被 MagicMock 静默吞掉（等于没有测试它）。
+        import types as _types
+
+        graph._safe_resume_checkpoint = _types.MethodType(
+            TradingAgentsGraph._safe_resume_checkpoint, graph
+        )
+        graph._refuse_incompatible_legacy_checkpoint = _types.MethodType(
+            TradingAgentsGraph._refuse_incompatible_legacy_checkpoint, graph
+        )
+        # A05: prepare_graph_run 现经由 run_context + _prepare_graph_run；
+        # mock 上指回真实内部实现，否则整段逻辑被 MagicMock 吞掉。
+        graph.run_context = _nullcontext
+        graph._prepare_graph_run = _types.MethodType(
+            TradingAgentsGraph._prepare_graph_run, graph
         )
         return graph, log
 
@@ -1090,63 +1220,326 @@ class TestPointInTimeGraphIntegration:
         created = graph.propagator.create_initial_state.call_args
         assert "August" not in created.kwargs["past_context"]
 
-    def _compiled_with_snapshot(self, graph, past_context):
-        """把带 past_context 快照的编译图挂到 workflow.compile() 上。
+    def _qg_workflow(self, seen):
+        """单 writer 图：START → Market Analyst → Quality Gate → END。"""
+        workflow = StateGraph(AgentState)
+        workflow.add_node("Market Analyst", lambda _: {"market_report": "done"})
 
-        prepare_graph_run 在 checkpoint 模式下会执行
-        ``self.graph = self.workflow.compile(checkpointer=saver)``，所以快照
-        必须挂在 workflow.compile 的返回值上，直接给 graph.graph 赋值会被覆盖。
-        """
-        snapshot = MagicMock()
-        snapshot.values = {"past_context": past_context}
-        compiled = MagicMock()
-        compiled.get_state.return_value = snapshot
-        graph.workflow.compile.return_value = compiled
-        return compiled
+        def quality_gate(state):
+            seen.append(state.get("past_context", ""))
+            return {"data_quality_summary": "done"}
+
+        workflow.add_node("Quality Gate", quality_gate)
+        workflow.add_edge(START, "Market Analyst")
+        workflow.add_edge("Market Analyst", "Quality Gate")
+        workflow.add_edge("Quality Gate", END)
+        return workflow
 
     def test_resume_refreshes_stale_past_context(self, tmp_path):
-        """恢复路径：checkpoint 里的未过滤 past_context 被重算覆盖。"""
-        graph, log = self._fake_graph(tmp_path, checkpoint_enabled=True)
-        log.store_decision("600519", "2026-08-01", "August future decision text.")
-        log.update_with_outcome(
-            "600519", "2026-08-01", 0.20, 0.05, 5,
-            "August future lesson.", outcome_end="2026-08-10",
-        )
+        """恢复路径（真实 SQLite 断点）：未过滤 past_context 被原位刷新。
 
-        # 模拟旧版本写入的污染 checkpoint state
-        compiled = self._compiled_with_snapshot(
-            graph, "POLLUTED: August future lesson."
-        )
-
-        with patch("tradingagents.graph.trading_graph.get_checkpointer") as mock_gc, \
-             patch("tradingagents.graph.trading_graph.checkpoint_step", return_value=7):
-            mock_gc.return_value.__enter__.return_value = MagicMock()
-            init_state, _, step = TradingAgentsGraph.prepare_graph_run(
-                graph, "600519", "2026-01-15"
+        单一最后写入者场景 update_state 无歧义：刷新成功后恢复执行，质量
+        检查恰好运行一次且看到的是按时间边界重算的干净上下文。
+        """
+        seen = []
+        workflow = self._qg_workflow(seen)
+        config = {"configurable": {"thread_id": thread_id("600519", "2026-01-15")}}
+        with get_checkpointer(str(tmp_path), "600519") as saver:
+            graph = workflow.compile(checkpointer=saver, interrupt_before=["Quality Gate"])
+            graph.invoke(
+                Propagator().create_initial_state("600519", "2026-01-15", "FUTURE_POLLUTION"),
+                config,
             )
 
-        assert init_state is None, "存在 checkpoint 时应走恢复路径"
-        assert step == 7
-        compiled.get_state.assert_called_once()
-        compiled.update_state.assert_called_once()
-        updated_payload = compiled.update_state.call_args.args[1]
-        assert "August" not in updated_payload["past_context"], (
-            "恢复时未按分析时点重算 past_context"
+        runner = _checkpoint_runner(tmp_path, workflow)
+        try:
+            initial, args, _ = runner.prepare_graph_run("600519", "2026-01-15")
+            assert initial is None, "存在 checkpoint 时应走恢复路径"
+            runner.graph.invoke(initial, **args)
+        finally:
+            runner.close_graph_run()
+
+        assert seen == [""], (
+            f"恢复后质量检查应恰好执行一次且看到刷新后的干净上下文，实际: {seen}"
         )
 
     def test_resume_keeps_context_when_already_consistent(self, tmp_path):
-        """checkpoint 的 past_context 与重算一致时不做多余 update_state。"""
-        graph, log = self._fake_graph(tmp_path, checkpoint_enabled=True)
+        """断点上下文与重算一致时不做刷新，恢复正常完成。"""
+        seen = []
+        workflow = self._qg_workflow(seen)
+        config = {"configurable": {"thread_id": thread_id("600519", "2026-01-15")}}
+        with get_checkpointer(str(tmp_path), "600519") as saver:
+            graph = workflow.compile(checkpointer=saver, interrupt_before=["Quality Gate"])
+            graph.invoke(
+                Propagator().create_initial_state("600519", "2026-01-15", ""),
+                config,
+            )
 
-        fresh_ctx = log.get_past_context("600519", as_of="2026-01-15")
-        compiled = self._compiled_with_snapshot(graph, fresh_ctx)
+        runner = _checkpoint_runner(tmp_path, workflow)
+        try:
+            initial, args, _ = runner.prepare_graph_run("600519", "2026-01-15")
+            runner.graph.invoke(initial, **args)
+        finally:
+            runner.close_graph_run()
 
-        with patch("tradingagents.graph.trading_graph.get_checkpointer") as mock_gc, \
-             patch("tradingagents.graph.trading_graph.checkpoint_step", return_value=3):
-            mock_gc.return_value.__enter__.return_value = MagicMock()
-            TradingAgentsGraph.prepare_graph_run(graph, "600519", "2026-01-15")
+        assert seen == [""]
 
-        compiled.update_state.assert_not_called()
+    def test_new_graph_first_call_failure_retry_not_refused(self, tmp_path):
+        """F4 边界：新图首次调用失败（未产出消息）后重试，不得误报不兼容。
+
+        分析师节点第一次抛 TimeoutError：断点待执行 Market Analyst、分支
+        通道与共享通道都没有执行流量——恢复等价于从头执行该分支，是合法
+        重试，必须放行。
+        """
+        calls = {"n": 0}
+
+        def analyst_node(state):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TimeoutError("LLM first call timeout")
+            return {"messages": [AIMessage(content="market report")], "market_report": "DONE"}
+
+        setup = GraphSetup(
+            None, None, {"market": ToolNode([])}, ConditionalLogic(),
+            node_factories={"market": lambda llm: analyst_node},
+        )
+        workflow = setup.setup_graph(["market"])
+        config = {"configurable": {"thread_id": thread_id("600519", "2026-01-15")}}
+        with get_checkpointer(str(tmp_path), "600519") as saver:
+            graph = workflow.compile(checkpointer=saver)
+            with pytest.raises(TimeoutError, match="LLM first call timeout"):
+                graph.invoke(
+                    Propagator().create_initial_state("600519", "2026-01-15"), config
+                )
+
+        # 断点保留且确实停在分支节点、无任何分支/共享执行流量
+        assert has_checkpoint(str(tmp_path), "600519", "2026-01-15")
+        with get_checkpointer(str(tmp_path), "600519") as saver:
+            graph = workflow.compile(checkpointer=saver)
+            snap = graph.get_state(config)
+        assert snap.next == ("Market Analyst",)
+
+        runner = _checkpoint_runner(tmp_path, workflow)
+        try:
+            initial, args, _ = runner.prepare_graph_run("600519", "2026-01-15")
+            assert initial is None
+            # 只验证分支恢复执行，不进入下游 LLM 节点
+            list(runner.graph.stream(
+                initial, **args, interrupt_before=["Quality Gate"]
+            ))
+            assert (
+                runner.graph.get_state(args["config"]).values.get("market_report")
+                == "DONE"
+            ), "合法重试被误拒或未完成"
+        finally:
+            runner.close_graph_run()
+
+    def test_legacy_or_join_pending_quality_gate_refused(self, tmp_path):
+        """F4 边界：旧 OR 拓扑停在汇合屏障（Quality Gate 待执行）也必须拒绝。
+
+        旧图的汇合触发状态（首个完成分支即可启动质量检查）与新 AND 屏障
+        不等价；共享通道存在旧版执行流量是可靠证据。
+        """
+        workflow = StateGraph(AgentState)
+        # 旧拓扑：分析师把报告消息写进共享 messages 通道（R1 之前的行为）
+        workflow.add_node(
+            "Market Analyst",
+            lambda _: {"messages": [AIMessage(content="legacy market report")],
+                       "market_report": "legacy market report"},
+        )
+        workflow.add_node("Quality Gate", lambda _: {"data_quality_summary": "qg"})
+        workflow.add_edge(START, "Market Analyst")
+        workflow.add_edge("Market Analyst", "Quality Gate")
+        workflow.add_edge("Quality Gate", END)
+
+        config = {"configurable": {"thread_id": thread_id("600519", "2026-01-15")}}
+        with get_checkpointer(str(tmp_path), "600519") as saver:
+            graph = workflow.compile(checkpointer=saver, interrupt_before=["Quality Gate"])
+            graph.invoke(
+                Propagator().create_initial_state("600519", "2026-01-15"), config
+            )
+            assert graph.get_state(config).next == ("Quality Gate",)
+
+        runner = _checkpoint_runner(tmp_path, workflow)
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                runner.prepare_graph_run("600519", "2026-01-15")
+            assert _is_refusal(exc_info.value), str(exc_info.value)
+        finally:
+            runner.close_graph_run()
+
+        # 拒绝后断点保留（不清除用户数据）
+        assert has_checkpoint(str(tmp_path), "600519", "2026-01-15")
+
+    def test_legacy_post_gate_partial_reports_resume_refused(self, tmp_path):
+        """F4 最终收口：已越过旧 OR Quality Gate 的下游断点也必须拒绝。
+
+        旧拓扑下质量检查可能在部分分析师未完成时提前运行（news_report 仍
+        为空），断点停在 Bull Researcher 前——不能因为下游节点不读取
+        messages 通道就放行：不完整的报告会直接进入多空辩论。
+        """
+        # 旧拓扑图：Market Analyst 把报告消息写进共享 messages（R1 之前）
+        workflow = StateGraph(AgentState)
+        workflow.add_node(
+            "Market Analyst",
+            lambda _: {"messages": [AIMessage(content="legacy market report")],
+                       "market_report": "legacy market report"},
+        )
+        workflow.add_node(
+            "Quality Gate",
+            lambda _: {"data_quality_summary": "checked partial reports"},
+        )
+        workflow.add_node("Bull Researcher", lambda _: {"investment_plan": "should not run"})
+        workflow.add_edge(START, "Market Analyst")
+        workflow.add_edge("Market Analyst", "Quality Gate")
+        workflow.add_edge("Quality Gate", "Bull Researcher")
+        workflow.add_edge("Bull Researcher", END)
+
+        config = {"configurable": {"thread_id": thread_id("600519", "2026-01-15")}}
+        with get_checkpointer(str(tmp_path), "600519") as saver:
+            graph = workflow.compile(
+                checkpointer=saver, interrupt_before=["Bull Researcher"]
+            )
+            graph.invoke(
+                Propagator().create_initial_state("600519", "2026-01-15"), config
+            )
+            snap = graph.get_state(config)
+        assert snap.next == ("Bull Researcher",)
+        assert snap.values.get("news_report", "") == ""
+        assert snap.values.get("data_quality_summary") == "checked partial reports"
+
+        # 用当前 GraphSetup（market+news，AND 屏障拓扑）尝试恢复
+        setup = GraphSetup(
+            MagicMock(), MagicMock(),
+            {"market": ToolNode([]), "news": ToolNode([])},
+            ConditionalLogic(),
+        )
+        runner = _checkpoint_runner(tmp_path, setup.setup_graph(["market", "news"]))
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                runner.prepare_graph_run("600519", "2026-01-15")
+            assert _is_refusal(exc_info.value), str(exc_info.value)
+        finally:
+            runner.close_graph_run()
+
+        # 拒绝后断点保留，Bull 未执行
+        assert has_checkpoint(str(tmp_path), "600519", "2026-01-15")
+        with get_checkpointer(str(tmp_path), "600519") as saver:
+            graph = workflow.compile(checkpointer=saver)
+            resumed_values = graph.get_state(config).values
+        assert not resumed_values.get("investment_plan"), (
+            "旧 OR 断点的不完整报告不得流入下游辩论"
+        )
+
+    def test_new_isolated_graph_resumes_after_trader(self, tmp_path):
+        """F4 最终收口：新图 Trader 之后的断点正常恢复，不得误拒。
+
+        新版图的 Trader/辩论节点也向共享 messages 写 AIMessage——判别必须
+        结合分支通道内容：新图分析师阶段运行过后分支通道必有内容，此时
+        共享通道的 AI 流量来自下游节点，属合法状态。
+        """
+        from langchain_core.language_models.chat_models import BaseChatModel
+        from langchain_core.outputs import ChatGeneration, ChatResult
+
+        class MockChat(BaseChatModel):
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                return ChatResult(
+                    generations=[
+                        ChatGeneration(
+                            message=AIMessage(content="mocked downstream response")
+                        )
+                    ]
+                )
+
+            @property
+            def _llm_type(self):
+                return "mock-chat"
+
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+        mock_llm = MockChat()
+        setup = GraphSetup(
+            mock_llm, mock_llm,
+            {"market": ToolNode([]), "news": ToolNode([])},
+            ConditionalLogic(max_debate_rounds=1, max_risk_discuss_rounds=1),
+        )
+        workflow = setup.setup_graph(["market", "news"])
+        config = {"configurable": {"thread_id": thread_id("600519", "2026-01-15")}}
+        with get_checkpointer(str(tmp_path), "600519") as saver:
+            graph = workflow.compile(
+                checkpointer=saver, interrupt_before=["Aggressive Analyst"]
+            )
+            graph.invoke(
+                Propagator().create_initial_state("600519", "2026-01-15"), config
+            )
+            snap = graph.get_state(config)
+        # 断点确实停在 Trader 之后：Trader 已写共享 AIMessage，分析师报告齐全
+        assert snap.next == ("Aggressive Analyst",)
+        assert snap.values.get("trader_investment_plan")
+        assert self._has_shared_ai_traffic(snap.values)
+
+        runner = _checkpoint_runner(tmp_path, workflow)
+        try:
+            initial, args, _ = runner.prepare_graph_run("600519", "2026-01-15")
+            assert initial is None, "新图下游断点应正常恢复，不得误拒"
+            final = runner.graph.invoke(initial, **args)
+        finally:
+            runner.close_graph_run()
+
+        assert final.get("final_trade_decision"), "恢复后应完成剩余风控与决策"
+        assert final.get("market_report") and final.get("news_report")
+
+    @staticmethod
+    def _has_shared_ai_traffic(values):
+        return TradingAgentsGraph._shared_channel_has_ai_traffic(values)
+
+    def test_polluted_final_decision_refused_not_returned(self, tmp_path):
+        """F5 边界：已生成最终决策且记忆上下文污染 → 明确拒绝，不得当正常结果返回。
+
+        只擦 past_context 清理不掉已混入决策文本的未来信息；也不能只打
+        warning 就把旧决策作为成功分析交回。
+        """
+        returned = []
+
+        def decision_node(state):
+            return {
+                "market_report": "done",
+                "final_trade_decision": "BUY (influenced by FUTURE_POLLUTION)",
+            }
+
+        def tail_node(state):
+            returned.append(state.get("final_trade_decision", ""))
+            return {}
+
+        workflow = StateGraph(AgentState)
+        workflow.add_node("Market Analyst", decision_node)
+        workflow.add_node("Tail", tail_node)
+        workflow.add_edge(START, "Market Analyst")
+        workflow.add_edge("Market Analyst", "Tail")
+        workflow.add_edge("Tail", END)
+
+        config = {"configurable": {"thread_id": thread_id("600519", "2026-01-15")}}
+        with get_checkpointer(str(tmp_path), "600519") as saver:
+            graph = workflow.compile(checkpointer=saver, interrupt_before=["Tail"])
+            graph.invoke(
+                Propagator().create_initial_state("600519", "2026-01-15", "FUTURE_POLLUTION"),
+                config,
+            )
+            snap = graph.get_state(config)
+        assert snap.values.get("final_trade_decision")
+        assert snap.next == ("Tail",)
+
+        runner = _checkpoint_runner(tmp_path, workflow)
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                runner.prepare_graph_run("600519", "2026-01-15")
+            assert _is_refusal(exc_info.value), str(exc_info.value)
+        finally:
+            runner.close_graph_run()
+
+        assert not returned, "污染决策不得作为正常分析结果继续流转"
+        assert has_checkpoint(str(tmp_path), "600519", "2026-01-15")
 
     def test_fetch_returns_reports_window_end_date(self):
         """_fetch_returns 返回收益窗口的实际结束日（native 分支）。"""
@@ -1233,8 +1626,19 @@ class TestLegacyRemoval:
         mock_graph._run_graph = functools.partial(
             TradingAgentsGraph._run_graph, mock_graph
         )
+        # A05: 生命周期方法经由 run_context/_prepare_graph_run 等内部方法，
+        # mock 上指回真实实现，否则被 MagicMock 吞掉（返回值不可解包）。
+        import contextlib as _ctxlib
+
+        mock_graph.run_context = _ctxlib.nullcontext
+        mock_graph._prepare_graph_run = functools.partial(
+            TradingAgentsGraph._prepare_graph_run, mock_graph
+        )
         mock_graph.prepare_graph_run = functools.partial(
             TradingAgentsGraph.prepare_graph_run, mock_graph
+        )
+        mock_graph._finalize_graph_run = functools.partial(
+            TradingAgentsGraph._finalize_graph_run, mock_graph
         )
         mock_graph.finalize_graph_run = functools.partial(
             TradingAgentsGraph.finalize_graph_run, mock_graph

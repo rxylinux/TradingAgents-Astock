@@ -2,7 +2,11 @@
 
 import logging
 import os
+import re
+import threading
+from contextlib import contextmanager
 from pathlib import Path
+import copy
 import json
 from datetime import datetime, timedelta
 from typing import Dict, Any, Tuple, List, Optional
@@ -25,7 +29,7 @@ from tradingagents.agents.utils.agent_states import (
     InvestDebateState,
     RiskDebateState,
 )
-from tradingagents.dataflows.config import set_config
+from tradingagents.dataflows.config import reset_run_config, set_run_config
 
 # Import the new abstract tool methods from agent_utils
 from tradingagents.agents.utils.agent_utils import (
@@ -49,6 +53,12 @@ from tradingagents.agents.utils.agent_utils import (
 )
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
+from tradingagents.agents.utils.file_lock import file_lock
+from tradingagents.run_records import (
+    is_run_metadata,
+    new_run_metadata,
+    validate_run_id,
+)
 from .conditional_logic import BRANCH_MESSAGE_KEYS, ConditionalLogic
 from .setup import ROLE_KEYS, GraphSetup
 from .propagation import Propagator
@@ -178,12 +188,20 @@ class TradingAgentsGraph:
             callbacks: Optional list of callback handlers (e.g., for tracking LLM/tool stats)
         """
         self.debug = debug
-        self.config = config or DEFAULT_CONFIG
+        # A05: 深拷贝调用方配置——嵌套 dict（如 tool_vendors）共享会让
+        # 调用方构造后的修改串进本图运行（并发任务互换数据源）。
+        self.config = copy.deepcopy(config or DEFAULT_CONFIG)
         self.callbacks = callbacks or []
 
-        # Update the interface's config
-        set_config(self.config)
+        # A10: 记住本次选中的分析师（顺序去重），运行入口写入 state 供
+        # 质量门控只检查启用集合。
+        self.selected_analysts = list(dict.fromkeys(selected_analysts))
 
+        # A05（最终收口）: 构造对调用方上下文与进程默认都**零永久修改**
+        # ——并发构造另一个图既不能改掉调用方正在进行的运行快照，也不能
+        # 改写无快照上下文回退到的进程默认。运行期由 run_context 显式绑
+        # 定本图快照；构造链路本身不读取 get_config（如有新增读取需求，
+        # 须临时绑定快照并在 finally 恢复）。
         # Create necessary directories
         os.makedirs(self.config["data_cache_dir"], exist_ok=True)
         os.makedirs(self.config["results_dir"], exist_ok=True)
@@ -520,17 +538,36 @@ class TradingAgentsGraph:
         stock/index and CSI 300 benchmark returns. Yahoo Finance is retained as a fallback
         for non-A-share symbols or if native data is unavailable.
 
-        Returns ``(raw_return, alpha_return, actual_holding_days, window_end_date)``
-        where ``window_end_date`` is the actual last trading date of the return
-        window (from market data — not calendar arithmetic). Returns
-        ``(None, None, None, None)`` if price data is unavailable (too recent,
-        delisted, or network error). The end date is what makes a resolved
+        Evaluation window (A07/A08):
+
+        - The window is measured in the **target security's own trading days**:
+          the entry is its first trading day on/after trade_date, the exit is
+          its ``holding_days``-th trading day after that. Suspension days of
+          the target simply extend the calendar span.
+        - The benchmark MUST have rows on exactly those two dates; alpha is
+          computed start-date-to-end-date on both legs. A missing benchmark
+          endpoint (or a shortened window: too few target trading days, long
+          holidays, insufficient listing history) yields all-None and the
+          memory entry stays **pending** — the window is never silently
+          shortened and finalized via ``min()``.
+
+        Returns ``(raw_return, alpha_return, holding_days, window_end_date)``
+        where ``window_end_date`` is the exit trading date actually used (from
+        market data — not calendar arithmetic); it is what makes a resolved
         memory entry provably knowable at a given analysis point-in-time (R4).
         """
         try:
             start = datetime.strptime(trade_date, "%Y-%m-%d")
-            end = start + timedelta(days=holding_days + 7)  # buffer for weekends/holidays
-            end_str = end.strftime("%Y-%m-%d")
+            # A08: 取数范围覆盖到「今天」——窗口是否足够由拿到的实际交易日
+            # 行数决定，而不是任何固定自然日上限（Codex 边审：复牌远晚于
+            # 任何常数的长停牌，只要已复牌且交易日满就必须能结算；仍不足
+            # 才保持 pending）。native 的 end 含当日；Yahoo 的 end 是排他
+            # 语义，含当日需 +1 天。
+            today = datetime.now().strftime("%Y-%m-%d")
+            end_str = today
+            yahoo_end_str = (
+                datetime.strptime(today, "%Y-%m-%d") + timedelta(days=1)
+            ).strftime("%Y-%m-%d")
 
             # 1. Check if target is an index or A-share stock, and try native data pipeline first
             from tradingagents.dataflows.index_registry import is_index_symbol
@@ -554,20 +591,38 @@ class TradingAgentsGraph:
                         stock_df = stock_df[stock_df["Date"] >= pd.to_datetime(trade_date)].sort_values("Date").reset_index(drop=True)
                         bench_df = bench_df[bench_df["Date"] >= pd.to_datetime(trade_date)].sort_values("Date").reset_index(drop=True)
 
-                        if len(stock_df) >= 2 and len(bench_df) >= 2:
-                            actual_days = min(holding_days, len(stock_df) - 1, len(bench_df) - 1)
-                            if actual_days >= 1:
-                                raw = float(
-                                    (stock_df["Close"].iloc[actual_days] - stock_df["Close"].iloc[0])
-                                    / stock_df["Close"].iloc[0]
-                                )
-                                bench_ret = float(
-                                    (bench_df["Close"].iloc[actual_days] - bench_df["Close"].iloc[0])
-                                    / bench_df["Close"].iloc[0]
-                                )
-                                alpha = raw - bench_ret
-                                window_end = pd.to_datetime(stock_df["Date"].iloc[actual_days])
-                                return raw, alpha, actual_days, window_end.strftime("%Y-%m-%d")
+                        # A08: native 已有该标的数据但窗口未满（新股/长假/
+                        # 停牌）：交易日历对所有数据源一致，换源补不出更多
+                        # 交易日——保持 pending，也不落到其他源重复取数。
+                        if len(stock_df) - 1 < holding_days:
+                            return None, None, None, None
+
+                        start_date = pd.to_datetime(stock_df["Date"].iloc[0])
+                        end_date = pd.to_datetime(stock_df["Date"].iloc[holding_days])
+                        bench_close = (
+                            bench_df.assign(Date=pd.to_datetime(bench_df["Date"]))
+                            .drop_duplicates(subset="Date")
+                            .set_index("Date")["Close"]
+                        )
+                        # A07: 基准必须有完全相同的起止日期行——各自按
+                        # 行号取值会在停牌/缺行时比较不同日期。指数与个股
+                        # 共用同一交易日历，native 缺该日期换源也不会有。
+                        if start_date not in bench_close.index or end_date not in bench_close.index:
+                            return None, None, None, None
+
+                        s0 = float(stock_df["Close"].iloc[0])
+                        s1 = float(stock_df["Close"].iloc[holding_days])
+                        b0 = float(bench_close[start_date])
+                        b1 = float(bench_close[end_date])
+                        raw = (s1 - s0) / s0
+                        bench_ret = (b1 - b0) / b0
+                        alpha = raw - bench_ret
+                        return (
+                            raw,
+                            alpha,
+                            holding_days,
+                            end_date.strftime("%Y-%m-%d"),
+                        )
                 except Exception as e:
                     logger.debug("Native return fetch failed for %s: %s", ticker, e)
 
@@ -581,27 +636,39 @@ class TradingAgentsGraph:
             if _is_unsupported_by_yfinance(yf_bench):
                 yf_bench = "000300.SS"
 
-            stock = yf.Ticker(yf_symbol).history(start=trade_date, end=end_str)
-            benchmark = yf.Ticker(yf_bench).history(start=trade_date, end=end_str)
+            stock = yf.Ticker(yf_symbol).history(start=trade_date, end=yahoo_end_str)
+            benchmark = yf.Ticker(yf_bench).history(start=trade_date, end=yahoo_end_str)
 
-            if len(stock) < 2 or len(benchmark) < 2:
+            stock = stock[~stock.index.duplicated(keep="last")]
+            benchmark = benchmark[~benchmark.index.duplicated(keep="last")]
+
+            if len(stock) - 1 < holding_days:
                 return None, None, None, None
 
-            actual_days = min(holding_days, len(stock) - 1, len(benchmark) - 1)
-            if actual_days < 1:
+            # yfinance 的索引带交易所本地时区：对齐按**本地日历日**比较，
+            # 先剥离时区再取日期——跨时区的 normalize 若不剥 tz，同一交易
+            # 日在两条腿上是不相等的绝对时刻（Codex 边审）。
+            stock_days = pd.DatetimeIndex(
+                pd.to_datetime(stock.index).tz_localize(None)
+            ).normalize()
+            bench_days = pd.DatetimeIndex(
+                pd.to_datetime(benchmark.index).tz_localize(None)
+            ).normalize()
+            start_date = stock_days[0]
+            end_date = stock_days[holding_days]
+            bench_close = pd.Series(benchmark["Close"].values, index=bench_days)
+            if start_date not in bench_close.index or end_date not in bench_close.index:
+                # 基准端点日期缺失：无法对齐，保持 pending
                 return None, None, None, None
 
-            raw = float(
-                (stock["Close"].iloc[actual_days] - stock["Close"].iloc[0])
-                / stock["Close"].iloc[0]
-            )
-            bench_ret = float(
-                (benchmark["Close"].iloc[actual_days] - benchmark["Close"].iloc[0])
-                / benchmark["Close"].iloc[0]
-            )
+            s0 = float(stock["Close"].iloc[0])
+            s1 = float(stock["Close"].iloc[holding_days])
+            b0 = float(bench_close[start_date])
+            b1 = float(bench_close[end_date])
+            raw = (s1 - s0) / s0
+            bench_ret = (b1 - b0) / b0
             alpha = raw - bench_ret
-            window_end = pd.to_datetime(stock.index[actual_days])
-            return raw, alpha, actual_days, window_end.strftime("%Y-%m-%d")
+            return raw, alpha, holding_days, end_date.strftime("%Y-%m-%d")
         except Exception as e:
             logger.warning(
                 "Could not resolve outcome for %s on %s (will retry next run): %s",
@@ -647,6 +714,34 @@ class TradingAgentsGraph:
         if updates:
             self.memory_log.batch_update_with_outcomes(updates)
 
+    def bind_run_context(self):
+        """绑定本图配置快照到当前上下文，返回释放句柄（A05）。
+
+        分步调用方（CLI/Web：prepare → invoke → finalize → close 不在同
+        一函数内）用本方法 + ``release_run_context`` 覆盖整个序列；
+        ``run_context`` 上下文管理器是其 with 形式。
+        """
+        return set_run_config(self.config)
+
+    def release_run_context(self, token) -> None:
+        """释放 bind_run_context 的快照（异常路径也必须调用）。"""
+        reset_run_config(token)
+
+    @contextmanager
+    def run_context(self):
+        """绑定本图配置的运行快照（A05），全程覆盖 prepare→invoke→finalize。
+
+        构造线程的 ``set_config`` 读不到运行线程（ContextVar 按上下文隔
+        离），因此必须在**运行入口线程**重新绑定本图自己的配置快照；
+        finally 恢复，异常路径同样释放。propagate 内部已自行包裹；
+        prepare/finalize/close 各自也包裹（幂等，支持单独调用）。
+        """
+        token = self.bind_run_context()
+        try:
+            yield
+        finally:
+            self.release_run_context(token)
+
     def propagate(self, company_name, trade_date):
         """Run the trading agents graph for a company on a specific date.
 
@@ -654,7 +749,8 @@ class TradingAgentsGraph:
         with a per-ticker SqliteSaver so a crashed run can resume from the last
         successful node on a subsequent invocation with the same ticker+date.
         """
-        return self._run_graph(company_name, trade_date)
+        with self.run_context():
+            return self._run_graph(company_name, trade_date)
 
     def prepare_graph_run(
         self,
@@ -668,6 +764,15 @@ class TradingAgentsGraph:
         already exists, ``initial_state`` is ``None`` so LangGraph resumes the
         existing thread instead of replaying completed nodes.
         """
+        with self.run_context():
+            return self._prepare_graph_run(company_name, trade_date, callbacks)
+
+    def _prepare_graph_run(
+        self,
+        company_name,
+        trade_date,
+        callbacks: Optional[List] = None,
+    ) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any], Optional[int]]:
         self.ticker = company_name
 
         # Resolve any pending memory-log entries for this ticker before the pipeline runs.
@@ -705,34 +810,176 @@ class TradingAgentsGraph:
             args.setdefault("config", {}).setdefault("configurable", {})["thread_id"] = tid
 
         if checkpoint_enabled and resume_step is not None:
-            # 旧 checkpoint 可能携带未经时间过滤的 past_context（R4 之前的版本
-            # 写入）。恢复前按本次分析时点重算并覆盖，避免历史运行沿用未来
-            # 记忆；无法读取/更新时保持原状态并降级为日志提示。
-            try:
-                snap = self.graph.get_state(args["config"])
-                stale_ctx = (snap.values or {}).get("past_context")
-                fresh_ctx = self._past_context_as_of(company_name, str(trade_date))
-                if stale_ctx != fresh_ctx:
-                    self.graph.update_state(args["config"], {"past_context": fresh_ctx})
-                    logger.info(
-                        "Refreshed past_context on resumed checkpoint (time-bound filter)"
-                    )
-            except Exception:
-                logger.warning(
-                    "Could not refresh past_context on resumed checkpoint for %s; "
-                    "the resumed run keeps the checkpointed context",
-                    company_name,
-                    exc_info=True,
-                )
+            self._safe_resume_checkpoint(args["config"], company_name, str(trade_date))
             return None, args, resume_step
 
         # Initialize state only for fresh runs. Passing a new initial state to
         # LangGraph would start a new run and replay completed nodes.
         past_context = self._past_context_as_of(company_name, str(trade_date))
         init_agent_state = self.propagator.create_initial_state(
-            company_name, trade_date, past_context=past_context
+            company_name,
+            trade_date,
+            past_context=past_context,
+            selected_analysts=getattr(self, "selected_analysts", None),
+        )
+        # N02: fresh 运行生成身份（每次必然新 run_id）。恢复路径不经过此
+        # 处（initial_state=None）——同一 run 从 SQLite 恢复沿用 checkpoint
+        # 里的原 ID/配置/创建时间；不改变任何既有 checkpoint key。
+        init_agent_state["run_metadata"] = new_run_metadata(
+            self.config,
+            company_name,
+            str(trade_date),
+            instrument_type=self.config.get("instrument_type"),
+            selected_analysts=getattr(self, "selected_analysts", None),
         )
         return init_agent_state, args, resume_step
+
+    @staticmethod
+    def _shared_channel_has_ai_traffic(values: dict) -> bool:
+        """共享 messages 通道是否存在 AI/Tool 执行流量（不含初始 human 输入）。
+
+        注意这不是"旧版断点"的充分证据：新版图的辩论/交易/风控节点同样
+        把 AIMessage 写进共享通道。它必须与「分支通道是否全空」结合使用
+        （见 `_refuse_incompatible_legacy_checkpoint`）。
+        """
+        for m in values.get("messages") or []:
+            msg_type = getattr(m, "type", None)
+            if msg_type in ("ai", "tool"):
+                return True
+            if getattr(m, "tool_calls", None):
+                return True
+        return False
+
+    def _refuse_incompatible_legacy_checkpoint(
+        self, snap, company_name: str, trade_date: str
+    ) -> None:
+        """拒绝无法证明完整且兼容的旧版执行状态（F4，最终收口）。
+
+        判定依据是拓扑证据，不猜版本号：旧版图（分支消息通道引入之前）
+        把分析师的工具调用与报告**全部**写进共享 ``messages`` 通道，分支
+        通道必然全空；新版图只要分析师阶段真正运行过，至少一个选中分支
+        的 ``{role}_messages`` 通道就有内容（下游辩论/交易/风控节点写共享
+        通道不影响这一判据）。因此：
+
+        - 分支通道全空 + 共享通道有 AI/Tool 流量 → 旧版断点，**无论停在
+          哪个阶段**——待执行分支节点、汇合屏障（旧 OR 拓扑可能提前触
+          发）、已越过汇合点的辩论/交易/风控、乃至执行完毕的终态——其
+          报告完整性与屏障触发状态都无法证明与当前 AND 拓扑兼容，一律
+          明确拒绝并保留断点；
+        - 两侧通道都没有流量 → 新图首次调用在产出任何消息前失败（例如
+          LLM 超时）：恢复等价于从头执行该分支，合法重试，必须放行；
+        - 任一分支通道有内容 → 新版断点：下游阶段不依赖分支消息，正常
+          恢复。
+        """
+        values = snap.values or {}
+        shared_traffic = self._shared_channel_has_ai_traffic(values)
+        any_branch_msgs = any(
+            values.get(key) for key in BRANCH_MESSAGE_KEYS.values()
+        )
+
+        if shared_traffic and not any_branch_msgs:
+            pending = ", ".join(repr(n) for n in (snap.next or ())) or "（执行完毕的终态）"
+            raise RuntimeError(
+                f"检测到不兼容的旧版断点：{company_name} {trade_date} 的执行"
+                f"状态（待执行: {pending}）由旧版图写入——分析师消息全部在"
+                f"共享 messages 通道、分支通道为空，无法证明各分析师报告"
+                f"完整（旧 OR 拓扑下质量检查可能在部分分支未完成时提前"
+                f"运行）且汇合屏障状态与当前 AND 拓扑兼容。强行恢复会导致"
+                f"工具请求错配或不完整报告直接进入下游决策。已拒绝恢复并"
+                f"保留断点；请清除该日期的断点后重新开始分析。"
+            )
+
+    def _refuse_team_mismatch_checkpoint(
+        self, snap, company_name: str, trade_date: str
+    ) -> None:
+        """A10/Codex 退回：断点记录的分析师团队与当前图不一致 → 拒绝恢复。
+
+        新断点在初始 state 记录了 ``selected_analysts``；恢复图的团队若与
+        之不同（如原 market 恢复成 market+news），静默混用拓扑会让质量门
+        控、进度阶段与实际执行的分析师互相矛盾。明确拒绝并保留断点，不
+        重跑、不删除、不调用任何节点。
+
+        边界：旧断点（无该字段）无法可靠验证原团队——此时按当前图集合
+        执行（质量门控经工厂闭包取当前图启用角色），不声称实现了完整配
+        置指纹校验；见第 4 批交接「边界声明」。
+        """
+        recorded = (snap.values or {}).get("selected_analysts")
+        if not recorded:
+            return  # 旧断点无元数据：无法验证，按当前图执行（见边界声明）
+        current = getattr(self, "selected_analysts", None) or None
+        if current is None:
+            # 实例未声明启用集合（绕过 __init__ 的桩/异常构造）：无法验证
+            # 当前团队，归入同一边界——放行并依赖质量门控的工厂闭包。
+            return
+        if set(recorded) != set(current):
+            raise RuntimeError(
+                f"检测到分析师团队不兼容：{company_name} {trade_date} 的断点"
+                f"记录的团队为 {sorted(recorded)}，与当前图启用的 "
+                f"{sorted(current)} 不一致。静默混用会导致质量门控与实际执"
+                f"行互相矛盾；已拒绝恢复并保留断点。请用与原运行相同的分"
+                f"析师集合恢复，或清除该日期断点后重新开始。"
+            )
+
+    def _safe_resume_checkpoint(self, config, company_name: str, trade_date: str) -> None:
+        """恢复前的兼容与安全检查（F4/F5）。
+
+        1. 读取断点状态失败 → 拒绝恢复（无法证明状态安全）；
+        2. 旧版执行状态（分支通道全空而共享 messages 通道有 AI/Tool 流
+           量——无论停在分支节点、汇合屏障还是其后的辩论/交易/风控/
+           终态，都无法证明报告完整且屏障状态兼容）→ 明确拒绝（F4）；
+        3. 断点中的 past_context 与按当前时间边界重算的不一致：
+           - 决策已生成 → 拒绝恢复：旧决策可能已受未来记忆影响，不能当
+             正常结果返回（只擦 past_context 清理不了已混入决策文本的
+             内容）；
+           - 决策未生成 → 原位刷新；刷新失败（如并行最后写入者导致
+             LangGraph 无法推断 as_node）→ 拒绝——带着污染记忆继续就是
+             把未来信息喂给尚未执行的决策。
+        拒绝路径全部保留断点数据，绝不删除或谎称已自动恢复。
+        """
+        try:
+            snap = self.graph.get_state(config)
+        except Exception as e:
+            raise RuntimeError(
+                f"无法安全恢复 {company_name} {trade_date} 的断点：读取检查点"
+                f"状态失败（{type(e).__name__}: {e}）。断点已保留；请检查数据"
+                f"目录或清除该日期的断点后重新开始分析。"
+            ) from e
+
+        self._refuse_incompatible_legacy_checkpoint(snap, company_name, trade_date)
+
+        values = snap.values or {}
+        self._refuse_team_mismatch_checkpoint(snap, company_name, trade_date)
+
+        stale_ctx = values.get("past_context")
+        fresh_ctx = self._past_context_as_of(company_name, trade_date)
+        if stale_ctx == fresh_ctx:
+            return
+
+        if values.get("final_trade_decision"):
+            # 决策已生成，且其记忆上下文与按当前时间边界的重算不一致：
+            # 该决策可能使用了分析时点之后的记忆。不能只擦 past_context
+            # 就把旧决策当正常结果返回（决策文本里已混入未来信息），也
+            # 不能静默丢掉。明确拒绝恢复并保留断点，由用户决定重新开始。
+            raise RuntimeError(
+                f"无法安全恢复 {company_name} {trade_date} 的断点：断点中的最终"
+                f"决策生成于旧版记忆规则（其 past_context 含按当前时间边界应"
+                f"过滤的内容），该决策可能已受未来记忆影响，不能作为正常分析"
+                f"结果返回。已保留断点；请清除该日期的断点后重新开始分析。"
+            )
+
+        try:
+            self.graph.update_state(config, {"past_context": fresh_ctx})
+        except Exception as e:
+            raise RuntimeError(
+                f"无法安全恢复 {company_name} {trade_date} 的断点：断点中的历史"
+                f"记忆上下文包含按当前时间边界规则应过滤的内容，且原位刷新失败"
+                f"（{type(e).__name__}: {e}）。为避免历史分析使用未来记忆，已"
+                f"保留断点并停止恢复；请清除该日期的断点后重新开始分析。"
+            ) from e
+        logger.info(
+            "Refreshed past_context on resumed checkpoint (time-bound filter) "
+            "for %s %s", company_name, trade_date,
+        )
 
     def _past_context_as_of(self, company_name: str, trade_date: str) -> str:
         """Memory context limited to what was knowable at the analysis time.
@@ -746,6 +993,10 @@ class TradingAgentsGraph:
 
     def finalize_graph_run(self, company_name, trade_date, final_state):
         """Persist a completed run and clear its checkpoint."""
+        with self.run_context():
+            return self._finalize_graph_run(company_name, trade_date, final_state)
+
+    def _finalize_graph_run(self, company_name, trade_date, final_state):
         self.curr_state = final_state
 
         # Log state to disk.
@@ -768,16 +1019,20 @@ class TradingAgentsGraph:
 
     def close_graph_run(self) -> None:
         """Close the active checkpointer context, if any."""
-        if self._checkpointer_ctx is not None:
-            self._checkpointer_ctx.__exit__(None, None, None)
-            self._checkpointer_ctx = None
-            self.graph = self.workflow.compile()
+        with self.run_context():
+            if self._checkpointer_ctx is not None:
+                self._checkpointer_ctx.__exit__(None, None, None)
+                self._checkpointer_ctx = None
+                self.graph = self.workflow.compile()
 
     def _run_graph(self, company_name, trade_date):
         """Execute the graph and write the resulting state to disk and memory log."""
-        init_agent_state, args, _ = self.prepare_graph_run(company_name, trade_date)
-
+        # A05: prepare（含 checkpoint 重编译与 SqliteSaver 上下文获取）也在
+        # 关闭保护范围内——prepare 抛错同样必须 close，避免连接泄漏。
         try:
+            init_agent_state, args, _ = self.prepare_graph_run(
+                company_name, trade_date
+            )
             if self.debug:
                 final_state = None
                 # 分析师工具循环的消息在按角色隔离的分支通道上（R1），
@@ -804,49 +1059,147 @@ class TradingAgentsGraph:
             self.close_graph_run()
 
     def _log_state(self, trade_date, final_state):
-        """Log the final state to a JSON file."""
+        """Log the final state to a JSON file.
+
+        A14: 全部字段容错读取（部分完成的恢复路径可能缺字段）；交易员
+        计划以 canonical 字段 + legacy 别名双写（旧 JSON 读者兼容），展示/
+        导出经 ``web.report_fields.trader_plan`` 统一读取（canonical 优先、
+        只展示一次）；质量结论随统一 JSON 落盘，历史重载与实时一致。
+        """
+        debate = final_state.get("investment_debate_state") or {}
+        risk = final_state.get("risk_debate_state") or {}
+        trader_text = final_state.get("trader_investment_plan", "")
         self.log_states_dict[str(trade_date)] = {
-            "company_of_interest": final_state["company_of_interest"],
-            "trade_date": final_state["trade_date"],
-            "market_report": final_state["market_report"],
-            "sentiment_report": final_state["sentiment_report"],
-            "news_report": final_state["news_report"],
-            "fundamentals_report": final_state["fundamentals_report"],
+            "company_of_interest": final_state.get("company_of_interest", ""),
+            "trade_date": final_state.get("trade_date", str(trade_date)),
+            "market_report": final_state.get("market_report", ""),
+            "sentiment_report": final_state.get("sentiment_report", ""),
+            "news_report": final_state.get("news_report", ""),
+            "fundamentals_report": final_state.get("fundamentals_report", ""),
             "policy_report": final_state.get("policy_report", ""),
             "hot_money_report": final_state.get("hot_money_report", ""),
             "lockup_report": final_state.get("lockup_report", ""),
             "investment_debate_state": {
-                "bull_history": final_state["investment_debate_state"]["bull_history"],
-                "bear_history": final_state["investment_debate_state"]["bear_history"],
-                "history": final_state["investment_debate_state"]["history"],
-                "current_response": final_state["investment_debate_state"][
-                    "current_response"
-                ],
-                "judge_decision": final_state["investment_debate_state"][
-                    "judge_decision"
-                ],
+                "bull_history": debate.get("bull_history", ""),
+                "bear_history": debate.get("bear_history", ""),
+                "history": debate.get("history", ""),
+                "current_response": debate.get("current_response", ""),
+                "judge_decision": debate.get("judge_decision", ""),
             },
-            "trader_investment_decision": final_state["trader_investment_plan"],
+            "trader_investment_plan": trader_text,
+            "trader_investment_decision": trader_text,
+            "data_quality_summary": final_state.get("data_quality_summary", ""),
+            # N01: 结构化质量卡随统一 JSON 保存（旧报告无此键 → 加载端显示
+            # 未记录，不凭空生成）。
+            "data_quality": final_state.get("data_quality"),
             "risk_debate_state": {
-                "aggressive_history": final_state["risk_debate_state"]["aggressive_history"],
-                "conservative_history": final_state["risk_debate_state"]["conservative_history"],
-                "neutral_history": final_state["risk_debate_state"]["neutral_history"],
-                "history": final_state["risk_debate_state"]["history"],
-                "judge_decision": final_state["risk_debate_state"]["judge_decision"],
+                "aggressive_history": risk.get("aggressive_history", ""),
+                "conservative_history": risk.get("conservative_history", ""),
+                "neutral_history": risk.get("neutral_history", ""),
+                "history": risk.get("history", ""),
+                "judge_decision": risk.get("judge_decision", ""),
             },
-            "investment_plan": final_state["investment_plan"],
-            "final_trade_decision": final_state["final_trade_decision"],
+            "investment_plan": final_state.get("investment_plan", ""),
+            "final_trade_decision": final_state.get("final_trade_decision", ""),
+            # N02: 运行档案随报告保存（旧断点/旧流程无档案 → null = 未记录，
+            # 加载端不得把恢复时的当前配置伪装成原配置）。
+            "run_metadata": final_state.get("run_metadata"),
         }
 
         # Save to file. Reject ticker values that would escape the
         # results directory when joined as a path component.
         safe_ticker = safe_ticker_component(self.ticker)
-        directory = Path(self.config["results_dir"]) / safe_ticker / "TradingAgentsStrategy_logs"
-        directory.mkdir(parents=True, exist_ok=True)
+        # 日期是文件名组件：严格 YYYY-MM-DD，拒绝任何穿越/畸形形态。
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(trade_date)):
+            raise ValueError(
+                f"非法的分析日期 {trade_date!r}：必须为 YYYY-MM-DD。"
+            )
+        payload = self.log_states_dict[str(trade_date)]
 
-        log_path = directory / f"full_states_log_{trade_date}.json"
-        with open(log_path, "w", encoding="utf-8") as f:
-            json.dump(self.log_states_dict[str(trade_date)], f, indent=4)
+        legacy_dir = (
+            Path(self.config["results_dir"]) / safe_ticker / "TradingAgentsStrategy_logs"
+        )
+        legacy_dir.mkdir(parents=True, exist_ok=True)
+        latest_path = legacy_dir / f"full_states_log_{trade_date}.json"
+
+        # N02 发布事务（Codex 冻结审计语义）：以同 ticker/date 的发布范围
+        # （latest 路径为锚的跨实例/跨进程锁）保护「版本冲突检查 → 版本
+        # 写入 → latest 更新」整体——exists+replace 无互斥会让并发写者都
+        # 发布成功。锁内规则：
+        #   - 版本已存在且内容冲突 → 显式拒绝（历史不可变），latest 不动；
+        #   - 版本已存在且内容相同（重试）→ 必须补发布 latest（此前 latest
+        #     写失败不能永久漏发布），但 latest 已是**较新**运行时不倒退；
+        #   - 版本不存在 → 先写版本，成功后按同一不倒退规则写 latest
+        #     （版本写失败异常传播，不触碰 latest）。
+        meta = final_state.get("run_metadata")
+        has_archive = is_run_metadata(meta) and validate_run_id(meta.get("run_id", ""))
+        version_path = None
+        if has_archive:
+            run_dir = (
+                Path(self.config["results_dir"]) / "_runs" / meta["run_id"]
+                / safe_ticker / "TradingAgentsStrategy_logs"
+            )
+            run_dir.mkdir(parents=True, exist_ok=True)
+            version_path = run_dir / f"full_states_log_{trade_date}.json"
+
+        with file_lock(latest_path):
+            if version_path is not None:
+                if version_path.exists():
+                    existing = json.loads(version_path.read_text(encoding="utf-8"))
+                    if json.dumps(existing, sort_keys=True, ensure_ascii=False) != json.dumps(
+                        payload, sort_keys=True, ensure_ascii=False
+                    ):
+                        raise RuntimeError(
+                            f"运行 {meta['run_id']} 在 {trade_date} 的报告已存档且"
+                            f"内容不同，拒绝覆盖（历史记录不可变）。"
+                        )
+                    # 相同版本重试：走 latest 补发布（不重写已发布版本）
+                else:
+                    self._atomic_write_json(version_path, payload)
+            self._publish_latest_without_regression(latest_path, payload)
+
+    def _publish_latest_without_regression(self, latest_path: Path, payload: dict) -> None:
+        """更新最新兼容入口；已存在**较新**运行时不倒退。
+
+        Codex 冻结语义：相同版本重试必须修复未发布的 latest；但 latest
+        当前内容若属于创建时间更晚的另一个 run，保持较新者。latest 缺失/
+        畸形/无档案（旧格式）→ 视作可发布。
+        """
+        current_created = ""
+        cur_meta = payload.get("run_metadata")
+        if isinstance(cur_meta, dict):
+            current_created = str(cur_meta.get("created_at") or "")
+        if latest_path.exists():
+            try:
+                existing = json.loads(latest_path.read_text(encoding="utf-8"))
+                old_meta = existing.get("run_metadata") if isinstance(existing, dict) else None
+                old_created = (
+                    str(old_meta.get("created_at") or "")
+                    if isinstance(old_meta, dict) else ""
+                )
+                if old_created and current_created and old_created > current_created:
+                    return  # latest 已是较新运行：不倒退
+            except (OSError, json.JSONDecodeError):
+                pass  # 畸形 latest：覆盖修复
+        self._atomic_write_json(latest_path, payload)
+
+    @staticmethod
+    def _atomic_write_json(path: Path, payload: dict) -> None:
+        """原子写 JSON：唯一临时文件 + os.replace。
+
+        任何失败（序列化/IO）都清理临时文件——不留半份可见 JSON，也不留
+        孤儿 .tmp。
+        """
+        tmp_path = path.with_suffix(
+            f".tmp.{os.getpid()}.{threading.get_ident()}.json"
+        )
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=4, ensure_ascii=False)
+            os.replace(tmp_path, path)
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
 
     def process_signal(self, full_signal):
         """Process a signal to extract the core decision."""

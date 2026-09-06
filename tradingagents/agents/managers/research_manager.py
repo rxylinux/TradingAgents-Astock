@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from tradingagents.agents.schemas import ResearchPlan, render_research_plan
 from tradingagents.agents.utils.agent_utils import build_instrument_context, get_language_instruction
+from tradingagents.agents.report_quality import quality_context_for_prompt
 from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
@@ -16,6 +17,9 @@ def create_research_manager(llm):
     def research_manager_node(state) -> dict:
         instrument_context = build_instrument_context(state["company_of_interest"])
         history = state["investment_debate_state"].get("history", "")
+        # N01: 质量限制直接来自结构化质量卡（不依赖辩论转述）；旧 state 无
+        # 结构化记录时空段，保持原行为。
+        quality_block = quality_context_for_prompt(state)
 
         investment_debate_state = state["investment_debate_state"]
 
@@ -36,7 +40,7 @@ Note: This is an A-share (China mainland) stock. Factor in regulatory policy imp
 
 Commit to a clear stance whenever the debate's strongest arguments warrant one; reserve Hold for situations where the evidence on both sides is genuinely balanced.
 
----
+{quality_block}---
 
 **Debate History:**
 {history}""" + get_language_instruction()

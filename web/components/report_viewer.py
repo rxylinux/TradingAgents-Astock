@@ -140,10 +140,31 @@ def render_report(
 
     st.markdown("---")
 
+    # N01: 结构化质量卡（报告前部；与 MD/PDF 同一渲染；旧报告显示未记录，
+    # 原 data_quality_summary 文字仍在下方数据质量 expander 可查看）
+    from tradingagents.agents.report_quality import render_quality_card_md
+
+    with st.expander("🧾 报告质量卡（完整性）", expanded=True):
+        st.markdown(
+            _display_report_text(
+                render_quality_card_md(final_state.get("data_quality")),
+                ticker,
+                final_state,
+            )
+        )
+
     inv_plan = final_state.get("investment_plan", "")
     if inv_plan:
-        st.markdown("### 👔 最终投资建议")
+        st.markdown("### 👔 最终投资建议（研究经理）")
         st.markdown(_display_report_text(inv_plan, ticker, final_state))
+        st.markdown("---")
+
+    # A14: 组合经理的最终交易决策正文必须展示——investment_plan 只是研究
+    # 经理的意见，不能替代 final_trade_decision（组合层面的最终结论）。
+    final_decision = final_state.get("final_trade_decision", "")
+    if final_decision:
+        st.markdown("### 🎯 最终交易决策（组合经理）")
+        st.markdown(_display_report_text(final_decision, ticker, final_state))
         st.markdown("---")
 
     st.markdown("### 📊 分析师报告")
@@ -166,7 +187,10 @@ def render_report(
         with tab_judge:
             st.markdown(_display_report_text(debate.get("judge_decision", "") or "无数据", ticker, final_state))
 
-    trader_decision = final_state.get("trader_investment_decision", "")
+    # A14: 共享字段访问器——canonical 优先、legacy 兼容、只展示一次
+    from web.report_fields import trader_plan
+
+    trader_decision = trader_plan(final_state) or ""
     if trader_decision:
         with st.expander("💹 交易员决策", expanded=False):
             st.markdown(_display_report_text(trader_decision, ticker, final_state))

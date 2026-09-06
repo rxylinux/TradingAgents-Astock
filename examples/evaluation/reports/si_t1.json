@@ -1,0 +1,98 @@
+{
+  "messages": [
+    [
+      "human",
+      "601318"
+    ]
+  ],
+  "selected_analysts": [
+    "market"
+  ],
+  "company_of_interest": "601318",
+  "trade_date": "2026-01-15",
+  "past_context": "",
+  "investment_debate_state": {
+    "bull_history": "",
+    "bear_history": "",
+    "history": "",
+    "current_response": "",
+    "judge_decision": "",
+    "count": 0
+  },
+  "risk_debate_state": {
+    "aggressive_history": "",
+    "conservative_history": "",
+    "neutral_history": "",
+    "history": "",
+    "latest_speaker": "",
+    "current_aggressive_response": "",
+    "current_conservative_response": "",
+    "current_neutral_response": "",
+    "judge_decision": "",
+    "count": 0
+  },
+  "market_report": "",
+  "fundamentals_report": "",
+  "sentiment_report": "",
+  "news_report": "",
+  "policy_report": "",
+  "hot_money_report": "",
+  "lockup_report": "",
+  "data_quality_summary": "## 数据质量门控结果\n\n**标的**: 601318 | **交易日**: 2026-01-15 | **参与分析师**: 1 位\n\n### 硬检查结果\n- 技术分析师: [F] 报告为空\n\n### LLM 复审\n（跳过 — 多数报告未通过硬检查）\n",
+  "data_quality": {
+    "schema_version": 1,
+    "status": "insufficient",
+    "selected_analysts": [
+      "market"
+    ],
+    "analysts": [
+      {
+        "role": "market",
+        "name": "技术分析师",
+        "grade": "F",
+        "detail": "报告为空",
+        "chars": 0
+      }
+    ],
+    "active_count": 1,
+    "fail_count": 1,
+    "limitations": [
+      "技术分析师（market）: 报告为空"
+    ]
+  },
+  "final_trade_decision": "Rating: Hold\n数据严重不足。\n\n⚠️ 数据质量限制（报告完整性检查）：本次结论为受限研判。\n完整性状态: insufficient（1 位启用分析师中 1 位报告未通过完整性检查）。\n限制来源（报告完整性，不代表事实准确率）:\n- 技术分析师（market）: 报告为空\n该提示由代码硬检查确定性生成并随决策保存；使用本结论时请结合上述缺失评估影响。",
+  "trader_investment_plan": "分批建仓",
+  "trader_investment_decision": "分批建仓",
+  "run_metadata": {
+    "schema_version": 1,
+    "run_id": "78a0705c01a14cea9067658afe44c5f4",
+    "ticker": "601318",
+    "trade_date": "2026-01-15",
+    "instrument_type": "stock",
+    "created_at": "2026-09-06T08:38:42.479928+00:00",
+    "config_snapshot": {
+      "llm_provider": "glm",
+      "quick_think_llm": "glm-5.2",
+      "deep_think_llm": "glm-5.3",
+      "instrument_type": "stock",
+      "output_language": "Chinese",
+      "max_debate_rounds": 1,
+      "max_risk_discuss_rounds": 1,
+      "data_vendors": {
+        "core_stock_apis": "a_stock",
+        "technical_indicators": "a_stock",
+        "fundamental_data": "a_stock",
+        "news_data": "a_stock",
+        "signal_data": "a_stock"
+      },
+      "tool_vendors": {},
+      "agent_sdk_model": "opus",
+      "agent_sdk_quick_model": "sonnet",
+      "enable_debate_early_stopping": true,
+      "selected_analysts": [
+        "market"
+      ]
+    },
+    "config_fingerprint": "750c2c5d5a3e7d7c1b99bdd83f818d93b0494d0d700dced63b0463937cbc0dcb"
+  }
+}

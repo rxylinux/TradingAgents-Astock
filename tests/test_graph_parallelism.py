@@ -689,6 +689,13 @@ class TestCheckpointResumeParallelism:
 
         # 模拟 TradingAgentsGraph 实例
         fake_graph = MagicMock()
+        # A05: prepare_graph_run 经由 run_context/_prepare_graph_run，
+        # mock 上指回真实内部实现
+        fake_graph.run_context = lambda: __import__("contextlib").nullcontext()
+        import types as _t
+        fake_graph._prepare_graph_run = _t.MethodType(
+            TradingAgentsGraph._prepare_graph_run, fake_graph
+        )
         fake_graph.config = {
             "checkpoint_enabled": True,
             "data_cache_dir": tmpdir,

@@ -401,6 +401,30 @@ config = {
 
 ---
 
+## 离线评测
+
+固定案例 + 逐项确定性检查 + 人工事实标注 + 基线/候选对比，评估换模型/提示词/流程后哪些工程约束退化。
+
+```bash
+# 运行评测（输出 evaluation.json + evaluation.md）
+.venv/bin/python -m tradingagents.evaluation run \
+  --suite SUITE.json --submission SUBMISSION.json --output-dir NEW_DIR
+
+# 对比基线/候选（有退化时 exit 1）
+.venv/bin/python -m tradingagents.evaluation compare \
+  --baseline BASE/evaluation.json --candidate CAND/evaluation.json \
+  --output-dir DIFF_DIR --fail-on-regression
+
+# 计算文件 SHA-256 digest
+.venv/bin/python -m tradingagents.evaluation digest FILE.json
+```
+
+详见 [离线评测使用说明](docs/OFFLINE_EVALUATION_GUIDE.md) 和 [合成示例](examples/evaluation/README.md)；验证结果见 [N04 验收记录](docs/N04_ACCEPTANCE_2026-09-06.md)。
+
+> 评测的契约通过率反映报告完整性检查，不是事实准确率或投资胜率。
+
+---
+
 ## 常见问题排错
 
 **Q: 用 DeepSeek/通义/智谱，却报 `OpenAIError: The api_key client option must be set ... OPENAI_API_KEY`？**
@@ -620,5 +644,4 @@ config["agent_sdk_quick_model"] = "sonnet"    # 分析师节点
 #### 依赖说明
 
 `[agentsdk]` 的依赖链是 `claude-agent-sdk → mcp → httpx2`，**不碰 httpx**，与 mootdx 的 `httpx<0.26` 无冲突（已 `uv lock` 实测）——和 #87 里被移除的 `[google]` 情况不同，不需要单开 venv。
-
 

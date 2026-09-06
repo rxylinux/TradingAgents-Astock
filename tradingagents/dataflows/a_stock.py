@@ -25,6 +25,7 @@ import math
 import random
 import re as _re
 import socket
+import threading
 import time
 import uuid
 import urllib.request
@@ -33,7 +34,7 @@ import pandas as pd
 import requests as _requests
 
 from .utils import safe_ticker_component
-from .cache_utils import cached_data, robust_api_call
+from .cache_utils import DataFailure, cached_data, robust_api_call
 
 logger = logging.getLogger(__name__)
 
@@ -547,7 +548,11 @@ _EM_SESSION = _requests.Session()
 _EM_SESSION.headers.update({"User-Agent": _UA})
 # 两次东财请求最小间隔(秒)；批量多 Agent 场景可设环境变量 EM_MIN_INTERVAL=1.5~2 降速。
 _EM_MIN_INTERVAL = float(os.environ.get("EM_MIN_INTERVAL", "1.0"))
-_em_last_call = [0.0]  # 模块级上次东财请求时间戳
+_em_last_call = [0.0]  # monotonic 时间戳（限流判据，不受系统时钟回拨影响）
+# A13：串行限流必须在锁内完成「检查间隔 → 等待 → 请求 → 更新时间戳」。
+# 各线程基于上一次完成时间的裸判断会在第一条请求未完成时放行第二条；
+# with 保证成功/超时/异常路径都释放锁。
+_EM_THROTTLE_LOCK = threading.Lock()
 
 
 def _em_get(url, params=None, headers=None, timeout=15, **kwargs):
@@ -557,15 +562,16 @@ def _em_get(url, params=None, headers=None, timeout=15, **kwargs):
     串行限流：与上次东财请求间隔 < EM_MIN_INTERVAL 时 sleep 补足 + 0.1~0.5s 随机抖动。
     传入的 headers 会覆盖 session 默认 UA（用于保留各端点自己的 Referer/Origin）。
     """
-    wait = _EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
-    if wait > 0:
-        time.sleep(wait + random.uniform(0.1, 0.5))
-    try:
-        return _EM_SESSION.get(
-            url, params=params, headers=headers, timeout=timeout, **kwargs
-        )
-    finally:
-        _em_last_call[0] = time.time()
+    with _EM_THROTTLE_LOCK:
+        wait = _EM_MIN_INTERVAL - (time.monotonic() - _em_last_call[0])
+        if wait > 0:
+            time.sleep(wait + random.uniform(0.1, 0.5))
+        try:
+            return _EM_SESSION.get(
+                url, params=params, headers=headers, timeout=timeout, **kwargs
+            )
+        finally:
+            _em_last_call[0] = time.monotonic()
 
 
 def _eastmoney_datacenter(
@@ -597,6 +603,9 @@ def _eastmoney_datacenter(
 
     def _fetch():
         r = _em_get(_DATACENTER_URL, params=params, timeout=15)
+        # HTTP 状态与 JSON 载荷是两种不同的失败：4xx/5xx 响应体也可能是
+        # 可解析 JSON（网关错误页），不能因 JSON 可解析就当成功（F1）。
+        r.raise_for_status()
         d = r.json()
         if not isinstance(d, dict):
             raise ValueError(f"unexpected payload type: {type(d).__name__}")
@@ -1212,6 +1221,14 @@ def _sina_stock_code(code: str) -> str:
     return f"{_get_prefix(code)}{code}"
 
 
+# A04：财报披露/修订时间字段的候选名。仅认数据源实际返回的字段——线上
+# 接口是否提供同名字段未经验证，不预设其存在；都没有时历史模式保守缺失。
+_PUBLICATION_DATE_FIELDS = ("公告日期", "披露日期")
+# 修订/重述时间：同一报表的更正版本在原始披露之后发布，可知时间必须取
+# max(披露, 修订)，否则重述会悄悄回填到更早的分析时点。
+_REVISION_DATE_FIELDS = ("修订日期",)
+
+
 def _get_financial_report_sina(
     code: str, report_type: str, freq: str, curr_date: str = None,
 ) -> pd.DataFrame:
@@ -1238,17 +1255,30 @@ def _get_financial_report_sina(
     }
     def _fetch():
         r = _requests.get(url, params=params, headers={"User-Agent": _UA}, timeout=15)
-        return r.json()
+        r.raise_for_status()
+        d = r.json()
+        if not isinstance(d, dict) or not isinstance(d.get("result"), dict):
+            raise ValueError(
+                f"unexpected payload from sina finance report API: {type(d).__name__}"
+            )
+        status = d["result"].get("status") or {}
+        code_value = status.get("code")
+        if code_value is not None and int(code_value) != 0:
+            raise ValueError(
+                f"sina finance report business error: code={code_value} "
+                f"{status.get('msg', '')}"
+            )
+        return d
 
-    try:
-        d = robust_api_call(
-            _fetch,
-            max_retries=2,
-            fallback_value={},
-            error_log_prefix=f"Sina finance report query failed for {code}",
-        )
-    except Exception:
-        d = {}
+    # F1: 失败必须向上传播到工具边界（get_*_statement 的 except 统一转为
+    # "Error retrieving ..." 失败输出，不进缓存）。不能在这里吞异常返回
+    # 空 DataFrame——那会让网络故障伪装成 "No ... data found" 的成功空
+    # 结果，并被长期缓存（数据源恢复后仍返回旧空数据）。
+    d = robust_api_call(
+        _fetch,
+        max_retries=2,
+        error_log_prefix=f"Sina finance report query failed for {code}",
+    )
 
     result = d.get("result", {}).get("data", {})
     items = result.get(source_type, [])
@@ -1257,17 +1287,82 @@ def _get_financial_report_sina(
 
     df = pd.DataFrame(items)
 
-    # Filter by curr_date
-    if curr_date and "报告日" in df.columns:
+    def _empty_with_reason(reason: str) -> pd.DataFrame:
+        empty = pd.DataFrame()
+        empty.attrs["missing_reason"] = reason
+        return empty
+
+    # ── A04：以实际披露/修订可知时间过滤，而不是会计报告期 ──
+    # 报告期（报告日）是资产负债表截止日，不是信息可知日：6-30 期末的报表
+    # 通常 8 月才披露，两个日期之间做历史分析会拿到当时尚未公开的数据。
+    # 可知性判据只认数据源实际提供的时间字段（候选名见模块常量）——该检查
+    # 不依赖「报告日」列存在；缺失或解析失败的日期无法证明可知，按未来信
+    # 息剔除（保守）。
+    if "报告日" in df.columns:
         df["报告日"] = pd.to_datetime(df["报告日"], errors="coerce")
+
+    pub_col = next((c for c in _PUBLICATION_DATE_FIELDS if c in df.columns), None)
+    rev_col = next((c for c in _REVISION_DATE_FIELDS if c in df.columns), None)
+
+    if curr_date:
         cutoff = pd.to_datetime(curr_date)
-        df = df[df["报告日"] <= cutoff]
+
+        if _is_historical(curr_date):
+            if pub_col is None and rev_col is None:
+                # 源不提供任何披露/修订时间：无法证明哪一行在当时可知——
+                # 保守返回缺失（attrs.missing_reason 由工具层转为显式说
+                # 明），绝不把今天的快照当成历史事实。
+                return _empty_with_reason(
+                    f"数据源未提供披露/修订时间字段，无法证明 "
+                    f"{str(curr_date)[:10]} 当时哪些财报已公开（保守处理，"
+                    "未返回实时快照）"
+                )
+
+            # 行级可知时间 = max(披露, 修订)：晚于分析日的修订（重述/更正）
+            # 尚未发生，该版本不可用。**所有存在的时间字段都必须有效**——
+            # 修订列存在而值缺失/无效时，无法证明该行是「未经修订的原版」
+            # 还是「丢失了修订元数据的版本」，保守剔除（Codex 边审 3）。
+            parts = [
+                pd.to_datetime(df[c], errors="coerce")
+                for c in (pub_col, rev_col) if c is not None
+            ]
+            knowable = pd.concat(parts, axis=1).max(axis=1)
+            all_fields_valid = pd.concat(
+                [p.notna() for p in parts], axis=1
+            ).all(axis=1)
+            df = df[all_fields_valid & (knowable <= cutoff)]
+
+            # 同一报告期存在多次披露（更正/重述）时，取分析日当时已知的
+            # 最新版本——重述不得回填到更早的分析时点。
+            if not df.empty and "报告日" in df.columns:
+                latest_idx = (
+                    df.assign(_k=knowable[df.index])
+                    .sort_values("_k")
+                    .groupby("报告日")
+                    .tail(1)
+                    .index
+                )
+                df = df.loc[latest_idx]
+
+            if df.empty:
+                return _empty_with_reason(
+                    f"截至 {str(curr_date)[:10]}（含披露与修订时间）没有"
+                    f"已公开的{report_type}数据"
+                )
+        elif "报告日" in df.columns:
+            # 非历史（今天/未来日期）：恢复原报告期过滤——当前 API 返回的
+            # 都已披露，但报告期晚于分析日的仍不应出现。
+            df = df[df["报告日"] <= cutoff]
 
     # Filter by frequency (annual = month 12 reports only)
     if freq.lower() == "annual" and "报告日" in df.columns:
         months = pd.to_datetime(df["报告日"], errors="coerce").dt.month
         df = df[months == 12]
 
+    # 最近 8 期：显式按报告期降序，不依赖 API 返回顺序（Codex 边审 4：
+    # 升序排序后 head(8) 会取最旧的 8 期）。
+    if "报告日" in df.columns and not df.empty:
+        df = df.sort_values("报告日", ascending=False)
     return df.head(8)
 
 
@@ -1284,6 +1379,10 @@ def get_balance_sheet(
         df = _get_financial_report_sina(code, "资产负债表", freq, curr_date)
 
         if df.empty:
+            reason = df.attrs.get("missing_reason")
+            if reason:
+                # A04：历史分析无法证明可知性 → 显式缺失（不缓存）
+                return DataFailure(f"[数据缺失: 资产负债表] {reason}")
             return f"No balance sheet data found for A-stock '{code}'"
 
         csv_string = df.to_csv(index=False)
@@ -1316,6 +1415,9 @@ def get_cashflow(
         df = _get_financial_report_sina(code, "现金流量表", freq, curr_date)
 
         if df.empty:
+            reason = df.attrs.get("missing_reason")
+            if reason:
+                return DataFailure(f"[数据缺失: 现金流量表] {reason}")
             return f"No cash flow data found for A-stock '{code}'"
 
         csv_string = df.to_csv(index=False)
@@ -1348,6 +1450,9 @@ def get_income_statement(
         df = _get_financial_report_sina(code, "利润表", freq, curr_date)
 
         if df.empty:
+            reason = df.attrs.get("missing_reason")
+            if reason:
+                return DataFailure(f"[数据缺失: 利润表] {reason}")
             return f"No income statement data found for A-stock '{code}'"
 
         csv_string = df.to_csv(index=False)
@@ -1885,8 +1990,14 @@ def _save_northbound_snapshot(date_str: str, hgt: float, sgt: float) -> None:
             writer.writerow([d, existing[d][0], existing[d][1]])
 
 
-def _load_northbound_history(n: int = 20) -> list[tuple[str, float, float]]:
-    """Load last N days of northbound close data from local cache."""
+def _load_northbound_history(n: int | None = 20) -> list[tuple[str, float, float]]:
+    """Load daily northbound close data from local cache.
+
+    ``n=None`` returns ALL cached rows — callers that filter by an analysis
+    date must load everything first and take the trailing window *after*
+    filtering (A03/Codex 边审 1: 截尾后再过滤会把「分析日之前的真实历史」
+    误判为无数据，窗口也被未来行挤占)。
+    """
     import csv
 
     path = _northbound_cache_path()
@@ -1902,6 +2013,8 @@ def _load_northbound_history(n: int = 20) -> list[tuple[str, float, float]]:
                     rows.append((row[0], float(row[1]), float(row[2])))
                 except ValueError:
                     continue
+    if n is None:
+        return rows
     return rows[-n:]
 
 
@@ -1916,6 +2029,11 @@ def get_northbound_flow(
     Realtime: minute-level cumulative net buying for HGT(沪股通) + SGT(深股通).
     History: self-cached daily close snapshots (upstream APIs stopped updating
     northbound history since 2024-08).
+
+    Historical requests (A03): the realtime minute feed is *today's* flow —
+    it must not be presented as (nor influence signals for) an earlier
+    analysis date, and cached daily rows after the analysis date are dropped
+    before the window/average is computed.
     """
     import requests
 
@@ -1934,51 +2052,72 @@ def get_northbound_flow(
         "",
     ]
 
+    historical = _is_historical(curr_date)
     hgt_close = 0.0
     sgt_close = 0.0
     got_realtime = False
 
     try:
-        url_rt = "https://data.hexin.cn/market/hsgtApi/method/dayChart/"
-        r = requests.get(url_rt, headers=hsgt_headers, timeout=10)
-        d = r.json()
-
-        times = d.get("time", [])
-        hgt = d.get("hgt", [])
-        sgt = d.get("sgt", [])
-
-        if times:
-            lines.append("## Realtime (cumulative net buying, 亿元)")
-            n = len(times)
-            start_idx = max(0, n - 10)
-            for i in range(start_idx, n):
-                t = times[i]
-                h = hgt[i] if i < len(hgt) else "N/A"
-                s = sgt[i] if i < len(sgt) else "N/A"
-                lines.append(f"  {t}: HGT={h} SGT={s}")
-
-            hgt_close = float(hgt[-1]) if hgt else 0
-            sgt_close = float(sgt[-1]) if sgt else 0
-            total = hgt_close + sgt_close
+        if historical:
+            # A03：历史分析日不取实时分钟段——那是"今天"的资金流，把它放进
+            # 历史报告正文会直接污染当日判断（数字与信号都不可用）。
             lines.append(
-                f"\nClose: HGT(沪股通)={hgt_close:.2f}亿 "
-                f"SGT(深股通)={sgt_close:.2f}亿 "
-                f"Total={total:.2f}亿"
+                f"## 实时段未获取：{str(curr_date)[:10]} 为历史日期，"
+                "实时分钟北向数据不属于该日（未来函数防护）。"
             )
-            if total > 0:
-                lines.append("Signal: Net northbound INFLOW (bullish)")
-            elif total < 0:
-                lines.append("Signal: Net northbound OUTFLOW (bearish)")
-            got_realtime = True
+            lines.append(
+                _snapshot_notice(str(curr_date)[:10], "北向实时分钟资金流")
+            )
         else:
-            lines.append("No realtime data (non-trading hours or holiday)")
+            url_rt = "https://data.hexin.cn/market/hsgtApi/method/dayChart/"
+            r = requests.get(url_rt, headers=hsgt_headers, timeout=10)
+            d = r.json()
 
-        if got_realtime:
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            _save_northbound_snapshot(today_str, hgt_close, sgt_close)
+            times = d.get("time", [])
+            hgt = d.get("hgt", [])
+            sgt = d.get("sgt", [])
+
+            if times:
+                lines.append("## Realtime (cumulative net buying, 亿元)")
+                n = len(times)
+                start_idx = max(0, n - 10)
+                for i in range(start_idx, n):
+                    t = times[i]
+                    h = hgt[i] if i < len(hgt) else "N/A"
+                    s = sgt[i] if i < len(sgt) else "N/A"
+                    lines.append(f"  {t}: HGT={h} SGT={s}")
+
+                hgt_close = float(hgt[-1]) if hgt else 0
+                sgt_close = float(sgt[-1]) if sgt else 0
+                total = hgt_close + sgt_close
+                lines.append(
+                    f"\nClose: HGT(沪股通)={hgt_close:.2f}亿 "
+                    f"SGT(深股通)={sgt_close:.2f}亿 "
+                    f"Total={total:.2f}亿"
+                )
+                if total > 0:
+                    lines.append("Signal: Net northbound INFLOW (bullish)")
+                elif total < 0:
+                    lines.append("Signal: Net northbound OUTFLOW (bearish)")
+                got_realtime = True
+            else:
+                lines.append("No realtime data (non-trading hours or holiday)")
+
+            if got_realtime:
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                _save_northbound_snapshot(today_str, hgt_close, sgt_close)
 
         if include_history:
-            history = _load_northbound_history(20)
+            if historical:
+                # A03/Codex 边审 1：先加载全部缓存，按分析日过滤**之后**再取
+                # 最近 20 日窗口——先截尾会把窗口挤占成未来行，误报无数据。
+                cutoff = str(curr_date)[:10]
+                history = [
+                    row for row in _load_northbound_history(None)
+                    if row[0] <= cutoff
+                ][-20:]
+            else:
+                history = _load_northbound_history(20)
             if history:
                 lines.append("\n## Historical Daily Close (local cache, 亿元)")
                 lines.append("Date       | HGT(沪股通) | SGT(深股通) | Total")
@@ -1996,15 +2135,22 @@ def get_northbound_flow(
                         f"({'above' if diff >= 0 else 'below'} average)"
                     )
             else:
-                lines.append(
-                    "\n## Historical Daily: No cached data yet. "
-                    "History accumulates automatically with each call."
-                )
+                if historical:
+                    lines.append(
+                        f"\n## Historical Daily: 本地缓存中没有 "
+                        f"{str(curr_date)[:10]} 及之前的北向快照，历史均值"
+                        "无法计算（缺失，非『净流入为零』）。"
+                    )
+                else:
+                    lines.append(
+                        "\n## Historical Daily: No cached data yet. "
+                        "History accumulates automatically with each call."
+                    )
 
         return "\n".join(lines)
 
     except Exception as e:
-        return f"Error fetching northbound flow: {str(e)}"
+        return DataFailure(f"[数据缺失: 北向资金查询失败] {type(e).__name__}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -2046,12 +2192,15 @@ def get_concept_blocks(
             "&finClientType=pc"
         )
         r = requests.get(url, headers=_BAIDU_PAE_HEADERS, timeout=10)
+        r.raise_for_status()
         d = r.json()
 
         if str(d.get("ResultCode", -1)) != "0":
-            return (
-                f"Baidu PAE error: ResultCode={d.get('ResultCode')} "
-                f"{d.get('ResultMsg', '')}"
+            # F2: 供应商业务失败用 DataFailure 报告——它会被缓存层按类型拒绝，
+            # 不再依赖英文错误文案匹配；[数据缺失] 前缀同时供质量门控识别。
+            return DataFailure(
+                f"[数据缺失: 概念板块供应商错误] Baidu PAE ResultCode="
+                f"{d.get('ResultCode')} {d.get('ResultMsg', '')}"
             )
 
         result = d.get("Result", {})
@@ -2089,7 +2238,10 @@ def get_concept_blocks(
         return "\n".join(lines)
 
     except Exception as e:
-        return f"Error fetching concept blocks for {code}: {str(e)}"
+        # F2: 网络/HTTP 失败同样以 DataFailure 输出，绝不落入缓存
+        return DataFailure(
+            f"[数据缺失: 概念板块查询失败] {type(e).__name__}: {e}"
+        )
 
 
 # ---- 14. get_fund_flow ----
@@ -2490,6 +2642,17 @@ def get_industry_comparison(
     """
     code = _normalize_ticker(ticker)
     lines = [f"# 行业横向对比 | {code} | {trade_date}"]
+
+    # A03：行业板块排名只有实时快照（东财 push2 不提供历史时点值）。历史
+    # 分析日不得把今天的涨跌幅放进当日报告正文——直接跳过请求并明示缺失，
+    # 而不是换个标题继续给模型实时数字。
+    if _is_historical(trade_date):
+        lines.append(
+            f"## 行业横向对比数据缺失：{str(trade_date)[:10]} 为历史日期，"
+            "数据源不提供历史时点的行业板块排名快照。"
+        )
+        lines.append(_snapshot_notice(str(trade_date)[:10], "行业板块涨跌幅排名"))
+        return "\n".join(lines)
 
     # 东财 push2 行业板块排名 (direct HTTP, replaces 同花顺 which has 401)
     try:

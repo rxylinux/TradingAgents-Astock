@@ -1,0 +1,144 @@
+{
+  "schema_version": 1,
+  "submission_id": "baseline-model-a",
+  "suite_id": "demo-contracts",
+  "suite_version": "1",
+  "suite_digest": "067557baa2d08b5e3e47a97fa9775846fa95b0bf4f20cd912cceed4c62020211",
+  "runs": [
+    {
+      "case_id": "stock_complete",
+      "trial_id": 1,
+      "status": "completed",
+      "report_path": "reports/sc_t1.json",
+      "review": {
+        "report_digest": "d75457784f7f8c9fc71d4c299fe21308a69194070c7783457ae014ca2c37a4be",
+        "reviewer": "合成审核者",
+        "reviewed_at": "2026-01-16T09:00:00+08:00",
+        "claims": [
+          {
+            "claim_id": "c1",
+            "field": "market_report",
+            "quote": "演示营业收入为42单位，同比增长18%",
+            "verdict": "supported",
+            "evidence_ids": [
+              "rev42"
+            ]
+          },
+          {
+            "claim_id": "c2",
+            "field": "market_report",
+            "quote": "毛利率45.2%，研发投入占比12.3%",
+            "verdict": "supported",
+            "evidence_ids": [
+              "margin45"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "stock_complete",
+      "trial_id": 2,
+      "status": "completed",
+      "report_path": "reports/sc_t2.json",
+      "observations": {
+        "latency_ms": 1500,
+        "input_tokens": 100,
+        "output_tokens": 200,
+        "cost_amount": 0.01,
+        "cost_currency": "USD"
+      }
+    },
+    {
+      "case_id": "stock_limited",
+      "trial_id": 1,
+      "status": "completed",
+      "report_path": "reports/sl_t1.json",
+      "observations": {
+        "latency_ms": 2000,
+        "cost_amount": 0.02,
+        "cost_currency": "USD"
+      },
+      "review": {
+        "report_digest": "0a6b17f34d08e58e97516fd77fff6c97e8b9d42c2aab597f085f2cc933aa97e6",
+        "reviewer": "合成审核者",
+        "reviewed_at": "2026-01-16T10:00:00+08:00",
+        "claims": [
+          {
+            "claim_id": "c1",
+            "field": "market_report",
+            "quote": "演示营业收入为42单位",
+            "verdict": "supported",
+            "evidence_ids": [
+              "past_fact"
+            ]
+          },
+          {
+            "claim_id": "c2",
+            "field": "market_report",
+            "quote": "演示营业收入为42单位",
+            "verdict": "supported",
+            "evidence_ids": [
+              "future_data"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "stock_insufficient",
+      "trial_id": 1,
+      "status": "completed",
+      "report_path": "reports/si_t1.json"
+    },
+    {
+      "case_id": "stock_insufficient",
+      "trial_id": 2,
+      "status": "failed",
+      "observations": {
+        "latency_ms": 500
+      }
+    },
+    {
+      "case_id": "index_normal",
+      "trial_id": 1,
+      "status": "completed",
+      "report_path": "reports/idx_t1.json",
+      "observations": {
+        "latency_ms": 1800,
+        "cost_amount": 14.0,
+        "cost_currency": "CNY"
+      }
+    },
+    {
+      "case_id": "index_normal",
+      "trial_id": 2,
+      "status": "completed",
+      "report_path": "reports/idx_t2.json"
+    },
+    {
+      "case_id": "stock_legacy",
+      "trial_id": 1,
+      "status": "completed",
+      "report_path": "reports/legacy_t1.json"
+    },
+    {
+      "case_id": "stock_legacy",
+      "trial_id": 2,
+      "status": "completed",
+      "report_path": "reports/legacy_t2.json"
+    },
+    {
+      "case_id": "stock_negative",
+      "trial_id": 1,
+      "status": "completed",
+      "report_path": "reports/neg_t1.json"
+    },
+    {
+      "case_id": "stock_negative",
+      "trial_id": 2,
+      "status": "completed",
+      "report_path": "reports/neg_t2.json"
+    }
+  ]
+}

@@ -38,6 +38,10 @@ from tradingagents.agents.utils.structured import (
     invoke_structured_or_freetext,
 )
 from tradingagents.agents.utils.technical_indicators_tools import get_indicators
+from tradingagents.agents.report_quality import (
+    append_limitation_notice,
+    quality_context_for_prompt,
+)
 from tradingagents.dataflows.config import get_config
 from tradingagents.dataflows.index_registry import parse_index_ticker
 from tradingagents.agents.utils.signal_data_tools import (
@@ -605,10 +609,12 @@ _INDEX_TRADER_SYSTEM = (
 def create_index_trader(llm):
     structured_llm = bind_structured(llm, TraderProposal, "Trader")
 
-    def trader_node(state, name):
+    def trader_node(state, name="Trader"):
         company_name = state["company_of_interest"]
         instrument_context = build_index_context(company_name)
         investment_plan = state["investment_plan"]
+        # N01: 交易员直接获得质量限制（指数路径同个股路径）
+        quality_block = quality_context_for_prompt(state)
 
         astock_context_parts = []
         if state.get("policy_report", ""):
@@ -636,6 +642,7 @@ def create_index_trader(llm):
                         if astock_context
                         else ""
                     )
+                    + (quality_block + "\n" if quality_block else "")
                     + "Leverage these insights to craft the directional view."
                     + get_language_instruction()
                 ),
@@ -678,6 +685,8 @@ def create_index_portfolio_manager(llm):
         risk_debate_state = state["risk_debate_state"]
         research_plan = state["investment_plan"]
         trader_plan = state["trader_investment_plan"]
+        # N01: 组合经理直接获得质量限制（指数路径）
+        quality_block = quality_context_for_prompt(state)
 
         past_context = state.get("past_context", "")
         lessons_line = (
@@ -711,7 +720,7 @@ def create_index_portfolio_manager(llm):
 **Context:**
 - Research Manager's investment plan: **{research_plan}**
 - Trader's directional proposal: **{trader_plan}**
-{lessons_line}
+{quality_block}{lessons_line}
 **Risk Analysts Debate History:**
 {history}
 
@@ -721,6 +730,10 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
 
         final_trade_decision = invoke_structured_or_freetext(
             structured_llm, llm, prompt, render_pm_decision, "Portfolio Manager"
+        )
+        # N01: 确定性质量提示（指数路径同个股路径；幂等、模型不遵循也不消失）
+        final_trade_decision = append_limitation_notice(
+            final_trade_decision, state.get("data_quality")
         )
 
         new_risk_debate_state = {

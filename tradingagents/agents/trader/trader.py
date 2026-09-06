@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage
 
 from tradingagents.agents.schemas import TraderProposal, render_trader_proposal
 from tradingagents.agents.utils.agent_utils import build_instrument_context, get_language_instruction
+from tradingagents.agents.report_quality import quality_context_for_prompt
 from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
@@ -24,10 +25,12 @@ _NO_LEVELS_INSTRUCTION = (
 def create_trader(llm):
     structured_llm = bind_structured(llm, TraderProposal, "Trader")
 
-    def trader_node(state, name):
+    def trader_node(state, name="Trader"):
         company_name = state["company_of_interest"]
         instrument_context = build_instrument_context(company_name)
         investment_plan = state["investment_plan"]
+        # N01: 交易员直接获得质量限制（不依赖辩论转述）
+        quality_block = quality_context_for_prompt(state)
 
         # Collect A-stock specific analyst reports
         policy_report = state.get("policy_report", "")
@@ -77,6 +80,7 @@ def create_trader(llm):
                     f"{instrument_context}\n\n"
                     f"Proposed Investment Plan:\n{investment_plan}\n\n"
                     + (f"Additional A-Stock Analyst Context:\n{astock_context}\n\n" if astock_context else "")
+                    + (quality_block + "\n" if quality_block else "")
                     + "Leverage these insights to craft the transaction view."
                     + get_language_instruction()
                 ),

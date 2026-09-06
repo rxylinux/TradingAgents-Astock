@@ -1,0 +1,96 @@
+{
+  "messages": [
+    [
+      "human",
+      "600519"
+    ]
+  ],
+  "selected_analysts": [
+    "market"
+  ],
+  "company_of_interest": "600519",
+  "trade_date": "2026-01-15",
+  "past_context": "",
+  "investment_debate_state": {
+    "bull_history": "",
+    "bear_history": "",
+    "history": "",
+    "current_response": "",
+    "judge_decision": "",
+    "count": 0
+  },
+  "risk_debate_state": {
+    "aggressive_history": "",
+    "conservative_history": "",
+    "neutral_history": "",
+    "history": "",
+    "latest_speaker": "",
+    "current_aggressive_response": "",
+    "current_conservative_response": "",
+    "current_neutral_response": "",
+    "judge_decision": "",
+    "count": 0
+  },
+  "market_report": "演示营业收入为42单位，同比增长18%，环比增长5%。毛利率45.2%，研发投入占比12.3%。资产负债率28.5%。演示营业收入为42单位，同比增长18%，环比增长5%。毛利率45.2%，研发投入占比12.3%。资产负债率28.5%。演示营业收入为42单位，同比增长18%，环比增长5%。毛利率45.2%，研发投入占比12.3%。资产负债率28.5%。演示营业收入为42单位，同比增长18%，环比增长5%。毛利率45.2%，研发投入占比12.3%。资产负债率28.5%。演示营业收入为42单位，同比增长18%，环比增长5%。毛利率45.2%，研发投入占比12.3%。资产负债率28.5%。演示营业收入为42单位，同比增长18%，环比增长5%。毛利率45.2%，研发投入占比12.3%。资产负债率28.5%。演示营业收入为42单位，同比增长18%，环比增长5%。毛利率45.2%，研发投入占比12.3%。资产负债率28.5%。演示营业收入为42单位，同比增长18%，环比增长5%。毛利率45.2%，研发投入占比12.3%。资产负债率28.5%。\n| 指标 | 值 |\n|---|---|\n| 营收 | 42单位 |",
+  "fundamentals_report": "",
+  "sentiment_report": "",
+  "news_report": "",
+  "policy_report": "",
+  "hot_money_report": "",
+  "lockup_report": "",
+  "data_quality_summary": "## 数据质量门控结果\n\n**标的**: 600519 | **交易日**: 2026-01-15 | **参与分析师**: 1 位\n\n### 硬检查结果\n- 技术分析师: [A] 完整 (507 chars)\n\n### LLM 复审\nreviewed\n",
+  "data_quality": {
+    "schema_version": 1,
+    "status": "complete",
+    "selected_analysts": [
+      "market"
+    ],
+    "analysts": [
+      {
+        "role": "market",
+        "name": "技术分析师",
+        "grade": "A",
+        "detail": "完整 (507 chars)",
+        "chars": 507
+      }
+    ],
+    "active_count": 1,
+    "fail_count": 0,
+    "limitations": []
+  },
+  "final_trade_decision": "Rating: Buy\n基于完整分析，建议持有。",
+  "trader_investment_plan": "分批建仓",
+  "trader_investment_decision": "分批建仓",
+  "run_metadata": {
+    "schema_version": 1,
+    "run_id": "ec2dcc60c8ed4eb6bde1d09af1dbec7d",
+    "ticker": "600519",
+    "trade_date": "2026-01-15",
+    "instrument_type": "stock",
+    "created_at": "2026-09-06T08:38:42.478949+00:00",
+    "config_snapshot": {
+      "llm_provider": "glm",
+      "quick_think_llm": "glm-5.2",
+      "deep_think_llm": "glm-5.3",
+      "instrument_type": "stock",
+      "output_language": "Chinese",
+      "max_debate_rounds": 1,
+      "max_risk_discuss_rounds": 1,
+      "data_vendors": {
+        "core_stock_apis": "a_stock",
+        "technical_indicators": "a_stock",
+        "fundamental_data": "a_stock",
+        "news_data": "a_stock",
+        "signal_data": "a_stock"
+      },
+      "tool_vendors": {},
+      "agent_sdk_model": "opus",
+      "agent_sdk_quick_model": "sonnet",
+      "enable_debate_early_stopping": true,
+      "selected_analysts": [
+        "market"
+      ]
+    },
+    "config_fingerprint": "750c2c5d5a3e7d7c1b99bdd83f818d93b0494d0d700dced63b0463937cbc0dcb"
+  }
+}

@@ -618,3 +618,68 @@ def test_tuple_messages_are_not_silently_emptied():
     system, user = _split_prompt([("system", "SYS"), ("human", "USER")])
     assert system == "SYS"
     assert "USER" in user
+
+
+# ---------------------------------------------------------------------------
+# A15: 内置工具必须被显式移除（不依赖已安装 SDK 的参数回归）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "with_tools",
+    [False, True],
+    ids=["plain_text_and_structured", "tool_loop_mcp"],
+)
+def test_build_options_disables_builtin_tools(with_tools, monkeypatch):
+    """三条路径（纯文本 / 结构化 / 投研 MCP 工具循环）都不得保留内置工具。
+
+    ``allowed_tools`` 只是自动批准列表，未列出的内置 Bash/Read/Write/Edit 在
+    bypassPermissions 下依然可用；``tools=[]`` 才显式移除全部内置工具。投研
+    路径的 MCP 服务器照常注册——研究节点只能调用绑定的投研工具。
+
+    本用例 mock ``ClaudeAgentOptions``/``create_sdk_mcp_server``，只检查实际
+    传入 SDK 的参数，不运行 SDK 子进程；SDK 未安装也可执行。
+    """
+    monkeypatch.setattr(mod, "ClaudeAgentOptions", lambda **kw: kw)
+    monkeypatch.setattr(mod, "create_sdk_mcp_server", lambda *a, **kw: "offline-server")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+
+    client = mod.ClaudeAgentSDKClient("offline")
+    kwargs = {}
+    if with_tools:
+        kwargs = dict(
+            sdk_tools=[object()],
+            tool_names=["get_stock_data"],
+        )
+    opts = client._build_options("offline system prompt", **kwargs)
+
+    assert opts.get("tools") == [], (
+        f"内置工具未被移除: { {k: opts.get(k) for k in ('tools', 'allowed_tools', 'permission_mode')} }"
+    )
+    assert opts.get("permission_mode") == "bypassPermissions"
+    if with_tools:
+        # 投研 MCP 仍可用：服务器已注册，且仅白名单内的 MCP 工具被自动批准
+        assert opts.get("mcp_servers") == {mod._MCP_SERVER_NAME: "offline-server"}
+        assert opts.get("allowed_tools") == [
+            f"mcp__{mod._MCP_SERVER_NAME}__get_stock_data"
+        ]
+        assert opts.get("max_turns") == mod._TOOL_MAX_TURNS
+    else:
+        # 纯文本/结构化路径：没有任何自动批准项，也没有 MCP 服务器
+        assert opts.get("allowed_tools") == []
+        assert "mcp_servers" not in opts
+        assert opts.get("max_turns") == 1
+
+
+def test_build_options_structured_path_also_disables_builtins(monkeypatch):
+    """结构化输出（output_format）路径同样不得保留内置工具。"""
+    monkeypatch.setattr(mod, "ClaudeAgentOptions", lambda **kw: kw)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+
+    client = mod.ClaudeAgentSDKClient("offline")
+    opts = client._build_options(None, output_format={"type": "json"})
+
+    assert opts.get("tools") == []
+    assert opts.get("output_format") == {"type": "json"}

@@ -39,6 +39,13 @@ def test_incomplete_task_round_trip(tmp_path, monkeypatch):
 
 
 def test_completed_history_hides_incomplete_task(tmp_path, monkeypatch):
+    """A11（语义修正）：旧完成报告只过滤**无断点**的陈旧条目。
+
+    旧行为（同 ticker/date 有完成报告就隐藏一切未完成记录）会让 fresh
+    重跑后的新失败任务失去恢复入口——旧报告不代表这一次运行已完成。
+    现在的判定依据是断点存在性：有有效断点 → 保留；无断点 + 有完成
+    报告 → 过滤。
+    """
     index = tmp_path / "incomplete_tasks.json"
     logs = tmp_path / "logs"
     log_dir = logs / "600370" / "TradingAgentsStrategy_logs"
@@ -49,10 +56,15 @@ def test_completed_history_hides_incomplete_task(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(history, "_INCOMPLETE_TASKS_FILE", index)
     monkeypatch.setattr(history, "_results_dir", lambda: logs)
+
+    # 有有效断点（step=3）：旧报告不得隐藏，恢复入口保留
     monkeypatch.setattr(history, "_checkpoint_step", lambda ticker, trade_date: 3)
-
     history.record_incomplete_task("600370", "2026-06-02", status="running")
+    rows = history.get_incomplete_history()
+    assert len(rows) == 1 and rows[0]["checkpoint_step"] == 3
 
+    # 无断点且已有完成报告：陈旧条目被合理过滤
+    monkeypatch.setattr(history, "_checkpoint_step", lambda ticker, trade_date: None)
     assert history.get_incomplete_history() == []
 
 

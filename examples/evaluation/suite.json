@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "suite_id": "demo-contracts",
+  "suite_version": "1",
+  "title": "演示研究报告约束案例（全部为合成数据，非真实行情或模型输出）",
+  "trials_per_case": 2,
+  "cases": [
+    {
+      "case_id": "stock_complete",
+      "ticker": "600519",
+      "trade_date": "2026-01-15",
+      "instrument_type": "stock",
+      "as_of": "2026-01-15T15:00:00+08:00",
+      "selected_analysts": [
+        "market"
+      ],
+      "expected_quality_status": "complete",
+      "allowed_ratings": [
+        "Buy",
+        "Overweight",
+        "Hold",
+        "Underweight",
+        "Sell"
+      ],
+      "evidence": [
+        {
+          "evidence_id": "rev42",
+          "available_at": "2026-01-15T10:00:00+08:00",
+          "text": "演示营业收入为42单位，同比增长18%"
+        },
+        {
+          "evidence_id": "margin45",
+          "available_at": "2026-01-14T16:00:00+08:00",
+          "text": "毛利率45.2%，研发投入占比12.3%"
+        }
+      ]
+    },
+    {
+      "case_id": "stock_limited",
+      "ticker": "000858",
+      "trade_date": "2026-01-15",
+      "instrument_type": "stock",
+      "as_of": "2026-01-15T15:00:00+08:00",
+      "selected_analysts": [
+        "market",
+        "news"
+      ],
+      "expected_quality_status": "limited",
+      "allowed_ratings": [
+        "Buy",
+        "Overweight",
+        "Hold",
+        "Underweight",
+        "Sell"
+      ],
+      "evidence": [
+        {
+          "evidence_id": "past_fact",
+          "available_at": "2026-01-15T09:00:00+08:00",
+          "text": "演示营业收入为42单位"
+        },
+        {
+          "evidence_id": "future_data",
+          "available_at": "2026-06-01T00:00:00+08:00",
+          "text": "未来才会公布的合成数据（演示时点违规）"
+        }
+      ]
+    },
+    {
+      "case_id": "stock_insufficient",
+      "ticker": "601318",
+      "trade_date": "2026-01-15",
+      "instrument_type": "stock",
+      "as_of": "2026-01-15T15:00:00+08:00",
+      "selected_analysts": [
+        "market"
+      ],
+      "expected_quality_status": "insufficient",
+      "allowed_ratings": [
+        "Buy",
+        "Overweight",
+        "Hold",
+        "Underweight",
+        "Sell"
+      ],
+      "evidence": []
+    },
+    {
+      "case_id": "index_normal",
+      "ticker": "000001.SH",
+      "trade_date": "2026-01-15",
+      "instrument_type": "index",
+      "as_of": "2026-01-15T15:00:00+08:00",
+      "selected_analysts": [
+        "market",
+        "social",
+        "news",
+        "policy",
+        "hot_money"
+      ],
+      "expected_quality_status": "complete",
+      "allowed_ratings": [
+        "Buy",
+        "Overweight",
+        "Hold",
+        "Underweight",
+        "Sell"
+      ],
+      "evidence": []
+    },
+    {
+      "case_id": "stock_legacy",
+      "ticker": "601899",
+      "trade_date": "2026-01-15",
+      "instrument_type": "stock",
+      "as_of": "2026-01-15T15:00:00+08:00",
+      "selected_analysts": [
+        "market"
+      ],
+      "expected_quality_status": "complete",
+      "allowed_ratings": [
+        "Buy",
+        "Overweight",
+        "Hold",
+        "Underweight",
+        "Sell"
+      ],
+      "evidence": []
+    },
+    {
+      "case_id": "stock_negative",
+      "ticker": "600036",
+      "trade_date": "2026-01-15",
+      "instrument_type": "stock",
+      "as_of": "2026-01-15T15:00:00+08:00",
+      "selected_analysts": [
+        "market"
+      ],
+      "expected_quality_status": "complete",
+      "allowed_ratings": [
+        "Buy",
+        "Overweight",
+        "Hold",
+        "Underweight",
+        "Sell"
+      ],
+      "evidence": []
+    }
+  ]
+}

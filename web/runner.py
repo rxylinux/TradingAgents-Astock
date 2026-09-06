@@ -281,7 +281,10 @@ def _run(ticker: str, trade_date: str, config: dict, tracker: ProgressTracker) -
         tracker.set_agent_status(aid, "running", "正在并发启动与分配分析任务...")
 
     if config.get("instrument_type") == "index":
+        # A09: 指数分支同样尊重 run_config 的 selected_analysts（app 端已
+        # 统一为指数预设/有效子集）——图与进度阶段对齐，不再静默忽略配置。
         graph = graph_cls(
+            selected_analysts=config.get("selected_analysts"),
             debug=True,
             config=config,
             callbacks=callbacks,
@@ -294,17 +297,33 @@ def _run(ticker: str, trade_date: str, config: dict, tracker: ProgressTracker) -
             callbacks=callbacks,
         )
 
-    init_state, args, _ = graph.prepare_graph_run(
-        ticker,
-        trade_date,
-        callbacks=callbacks,
-    )
+    # A05: 运行级配置快照覆盖 prepare→stream→finalize→close 全序列，
+    # 防止同进程其他会话的图串改本任务的语言/窗口/数据源。prepare 也纳入
+    # try：其抛错同样走 close + 上下文恢复；token 恰好释放一次（停止路径
+    # 的 _close_and_discard 与 finally 不重复 release，否则真实 ContextVar
+    # token 二次 reset 抛 RuntimeError）。
+    run_ctx_token = graph.bind_run_context()
+    released = {"ctx": False}
+
+    def _release_run_context_once() -> None:
+        if not released["ctx"]:
+            released["ctx"] = True
+            graph.release_run_context(run_ctx_token)
 
     last_chunk: dict[str, Any] = {}
 
     try:
+        init_state, args, _ = graph.prepare_graph_run(
+            ticker,
+            trade_date,
+            callbacks=callbacks,
+        )
+
         def _close_and_discard() -> None:
-            graph.close_graph_run()
+            try:
+                graph.close_graph_run()
+            finally:
+                _release_run_context_once()
             _discard_stopped_run(ticker, trade_date, config, tracker)
 
         if tracker.stop_requested:
@@ -357,7 +376,11 @@ def _run(ticker: str, trade_date: str, config: dict, tracker: ProgressTracker) -
         tracker.mark_complete(last_chunk, signal)
         clear_incomplete_task(ticker, trade_date)
     finally:
-        graph.close_graph_run()
+        # close 自身出错不得阻止上下文恢复（A05/Codex 退回修正）
+        try:
+            graph.close_graph_run()
+        finally:
+            _release_run_context_once()
 
 
 def run_analysis_in_thread(

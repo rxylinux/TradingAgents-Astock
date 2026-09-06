@@ -175,8 +175,14 @@ class GraphSetup:
             delete_nodes["lockup"] = create_msg_delete()
             tool_nodes["lockup"] = self.tool_nodes["lockup"]
 
-        # Create quality gate node
-        quality_gate_node = create_quality_gate(self.llm_for("quality_gate"))
+        # Create quality gate node. A10/Codex 退回：旧断点（分支隔离已存在
+        # 但无 selected_analysts 元数据）恢复时，质量门控取**当前实际图**
+        # 的启用集合，而不是默认七位——否则单 market 恢复会凭空评出 6 个
+        # F、指数恢复评出 2 个 F。新断点则优先使用 state 里的集合。
+        quality_gate_node = create_quality_gate(
+            self.llm_for("quality_gate"),
+            active_analysts_fallback=lambda: list(analyst_nodes.keys()),
+        )
 
         # Create researcher and manager nodes
         bull_researcher_node = self._node_factory("bull", create_bull_researcher)(self.llm_for("bull"))

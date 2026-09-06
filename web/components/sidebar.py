@@ -449,10 +449,27 @@ def render_sidebar() -> None:
 
     for entry in history[:20]:
         t, d = entry["ticker"], entry["date"]
-        label = f"{t}  ·  {d}"
-        if st.button(label, key=f"hist_{t}_{d}", use_container_width=True):
+        # N02: 同 ticker/date 可能有多次运行（不同 run_id）。按钮 key 基于
+        # 唯一记录（run_id 优先，旧记录回退规范化路径），不再只用 ticker/
+        # date——否则同日多版本在 Streamlit 中 key 冲突、只剩一个可点。
+        run_id = entry.get("run_id") or ""
+        button_key = (
+            f"hist_{t}_{d}_{run_id}" if run_id
+            else f"hist_{t}_{d}_{abs(hash(entry.get('path', '')))}"
+        )
+        # 标签带运行标识：同日多版本可区分；旧记录显示「历史版本」
+        tag = f"  ·  运行 {run_id[:8]}" if run_id else "  ·  历史版本"
+        created = entry.get("created_at") or ""
+        if created:
+            tag += f"  ·  {created[:16].replace('T', ' ')}"
+        label = f"{t}  ·  {d}{tag}"
+        if st.button(label, key=button_key, use_container_width=True):
             st.session_state["viewing_history"] = entry["path"]
             st.session_state["start_analysis"] = None
+            # Codex 退回 #6：侧栏点单份历史 → 退出对比模式
+            st.session_state.pop("comparing_history", None)
+            st.session_state.pop("cmp_result_md", None)
+            st.session_state.pop("cmp_identity", None)
 
     st.markdown("---")
     st.caption("⚠️ 仅供学习研究，不构成投资建议")

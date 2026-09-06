@@ -15,6 +15,10 @@ from tradingagents.agents.utils.agent_utils import (
     build_instrument_context,
     get_language_instruction,
 )
+from tradingagents.agents.report_quality import (
+    append_limitation_notice,
+    quality_context_for_prompt,
+)
 from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
@@ -40,6 +44,9 @@ def create_portfolio_manager(llm):
         research_plan = state["investment_plan"]
         trader_plan = state["trader_investment_plan"]
 
+        # N01: 组合经理直接获得质量限制（不依赖辩论转述）
+        quality_block = quality_context_for_prompt(state)
+
         past_context = state.get("past_context", "")
         lessons_line = (
             f"- Lessons from prior decisions and outcomes:\n{past_context}\n"
@@ -51,6 +58,7 @@ def create_portfolio_manager(llm):
 
 {instrument_context}
 
+{quality_block}
 ---
 
 **A-Stock Trading Constraints** (must factor into your decision):
@@ -97,6 +105,11 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
             prompt,
             render_pm_decision,
             "Portfolio Manager",
+        )
+        # N01: 确定性质量提示——即便模型不遵循提示词，受限研判标记也不消失；
+        # 幂等（只出现一次）；complete/unknown 不追加，保留原评级。
+        final_trade_decision = append_limitation_notice(
+            final_trade_decision, state.get("data_quality")
         )
 
         new_risk_debate_state = {

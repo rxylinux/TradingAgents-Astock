@@ -23,7 +23,10 @@ DEFAULT_CONFIG = {
     # The CLI overrides this per provider when the user picks one. Keeping a
     # provider-specific URL here would leak (e.g. OpenAI's /v1 was previously
     # being forwarded to Gemini, producing malformed request URLs).
-    "backend_url": os.getenv("BACKEND_URL", "https://open.bigmodel.cn/api/coding/paas/v4"),
+    # A02: 通用默认必须是 None——写死任何一家的地址都会在切换供应商后把请求
+    # 与认证信息发到错误端点。GLM Coding 计划的默认端点放在 GLM 专属配置
+    # （openai_client 的 glm 分支 + 下方说明），不影响其他供应商的默认端点。
+    "backend_url": os.getenv("BACKEND_URL"),
     # 单次回复的最大输出 token 数。None = 用 provider 自己的默认值。
     # 报告写到一半就断，通常就是撞了这个上限（不是上下文超长）——把它调大即可（#91）。
     # 走 anthropic 通道跑**第三方模型**（Kimi 等）时尤其要注意：langchain-anthropic

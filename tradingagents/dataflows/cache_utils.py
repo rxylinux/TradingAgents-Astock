@@ -122,15 +122,59 @@ class DiskCache:
 _MEM_CACHE = TTLCache(maxsize=1000, default_ttl=1800.0)  # 30 minutes memory cache
 _DISK_CACHE = DiskCache()
 
-# 缓存格式版本（R5）：v2 起失败输出不再写入任何一层缓存。磁盘命名空间带
-# 版本后缀，旧版本写入的污染条目（错误字符串）留在原命名空间，天然不再被
-# 读取——不删除用户已有缓存文件，升级后自动失效。
-CACHE_SCHEMA_VERSION = 2
+# A05: 缓存必须按运行配置隔离——原先 key 只有函数名和参数，同参数不同配置
+# （不同 data_cache_dir / 供应商）会命中对方的结果。作用域取自运行配置的
+# data_cache_dir：内存 key 加作用域前缀；磁盘按目录建立独立实例（自定义
+# data_cache_dir 真正生效）。作用域哈希不包含任何凭据值，也不会被日志打印。
+_SCOPE_DISK_CACHES: "dict[str, DiskCache]" = {}
+_SCOPE_DISK_GUARD = threading.Lock()
 
-# 已知失败输出标记。数据层工具会把请求失败转换为这些字符串（而不是抛异常
-# 或返回 None），仅凭 ``result is not None`` 判定可缓存会把它们连同 24 小时
-# 磁盘 TTL 一起持久化，数据源恢复后仍返回旧错误。新增失败文案时必须同步
-# 此处；读取时也用它做二次验证，兜住绕过写入口的污染条目。
+
+def _cache_scope() -> str:
+    """Current run's cache scope: fingerprint of behaviour-affecting config.
+
+    空串 = 没有运行快照（脱离图运行的直接工具调用）：沿用进程级全局缓存
+    单例（保持既有行为与测试隔离）。有运行快照时，作用域指纹 = 缓存目录
+    + 数据源选择（tool_vendors / data_vendors）——同参数不同配置（不同
+    目录**或**不同数据源）都不命中对方结果。指纹不含任何凭据值，也不被
+    日志打印。
+    """
+    from tradingagents.dataflows.config import get_config, run_cache_dir
+
+    if run_cache_dir() is None:
+        return ""
+    cfg = get_config()
+    parts = [
+        str(cfg.get("data_cache_dir") or ""),
+        repr(sorted((cfg.get("tool_vendors") or {}).items())),
+        repr(sorted((cfg.get("data_vendors") or {}).items())),
+    ]
+    return hashlib.md5("|".join(parts).encode("utf-8")).hexdigest()[:12]
+
+
+def _disk_cache_for(scope: str) -> DiskCache:
+    """Disk cache instance for a scope: global default, or a per-dir instance."""
+    if not scope:
+        return _DISK_CACHE
+    with _SCOPE_DISK_GUARD:
+        cache = _SCOPE_DISK_CACHES.get(scope)
+        if cache is None:
+            from tradingagents.dataflows.config import run_cache_dir
+
+            scope_dir = run_cache_dir() or ""
+            cache = DiskCache(cache_dir=os.path.join(scope_dir, "dataflows_cache"))
+            _SCOPE_DISK_CACHES[scope] = cache
+        return cache
+
+# 缓存格式版本（R5/F1/F2/A04）：v4 起，财报三表以实际披露可知时间过滤
+# （A04），v3 及更早写入的 financials 结果（按会计报告期过滤、可能包含
+# 当时尚未披露的报表）留在原命名空间天然失效——不删除用户已有缓存文件，
+# 升级后自动隔离。失败输出自 v2 起以 DataFailure / 失败标记表达，不进入
+# 任何一层缓存。
+CACHE_SCHEMA_VERSION = 4
+
+# 已知失败输出标记（字符串兜底，用于识别绕过写入口的历史污染条目）。
+# 新代码的失败输出应使用 DataFailure 类型（结构化判定，不依赖文案匹配）。
 _FAILURE_OUTPUT_MARKERS = (
     "[数据缺失",  # 数据层统一的请求失败/数据缺失标记（R3 起）
     "Error retrieving",  # 财报三表（Sina）失败前缀
@@ -138,13 +182,29 @@ _FAILURE_OUTPUT_MARKERS = (
 )
 
 
+class DataFailure(str):
+    """A tool output that reports a data retrieval failure.
+
+    Behaves exactly like ``str`` downstream (ToolMessage content, report
+    rendering), but ``cached_data`` refuses to persist it in either tier.
+    This is the structural fix for "failure text reaches the cache because
+    it is a non-None string": the failure semantics survive all the way to
+    the cache boundary instead of being matched by error-message prefixes.
+    """
+
+
 def _is_failure_output(result: Any) -> bool:
     """True if a function result is a failure/error string rather than data.
 
-    Success-but-empty outputs (e.g. ``"No data found for stock 600519"``) are
-    NOT failures: the query succeeded, caching them avoids hammering the
-    vendor for stocks that simply have no records.
+    ``DataFailure`` instances are failures by type. Plain strings containing
+    known failure markers are treated as failures too (legacy outputs and
+    defensively, polluted cache entries). Success-but-empty outputs (e.g.
+    ``"No data found for stock 600519"``) are NOT failures: the query
+    succeeded, caching them avoids hammering the vendor for stocks that
+    simply have no records.
     """
+    if isinstance(result, DataFailure):
+        return True
     return isinstance(result, str) and any(m in result for m in _FAILURE_OUTPUT_MARKERS)
 
 
@@ -160,18 +220,22 @@ def cached_data(
 ) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """Decorator to cache function results in Memory LRU and optional Disk.
 
-    Failure outputs (see ``_FAILURE_OUTPUT_MARKERS``) are never cached in
-    either tier, so a transient outage cannot shadow a recovering data source
-    for hours; successful results — including success-but-empty — are cached
-    with the configured TTLs.
+    Failures are never cached in either tier: ``DataFailure`` outputs (by
+    type) and strings with known failure markers (see
+    ``_FAILURE_OUTPUT_MARKERS``). A transient outage therefore cannot shadow
+    a recovering data source for hours. Successful results — including
+    success-but-empty — are cached with the configured TTLs.
     """
 
     def decorator(fn: Callable[..., T]) -> Callable[..., T]:
-        disk_ns = _versioned_namespace(namespace)
-
         def wrapper(*args, **kwargs) -> T:
+            # A05: 作用域前缀使同参数不同运行配置（缓存目录隔离的并发
+            # 任务）不会互相命中对方的结果。
+            scope = _cache_scope()
             # Build cache key from function arguments
-            key_raw = f"{fn.__name__}:{args}:{sorted(kwargs.items())}"
+            key_raw = f"{scope}|{fn.__name__}:{args}:{sorted(kwargs.items())}"
+            # use_disk=False 时不得创建磁盘实例/目录（连实例都不构建）
+            disk_cache = _disk_cache_for(scope) if use_disk else None
             # 1. Check memory cache (guard against failure strings anyway)
             cached_val = _MEM_CACHE.get(key_raw)
             if cached_val is not None and not _is_failure_output(cached_val):
@@ -179,7 +243,9 @@ def cached_data(
 
             # 2. Check disk cache
             if use_disk:
-                disk_val = _DISK_CACHE.get(disk_ns, key_raw, max_age_seconds=max_disk_age)
+                disk_val = disk_cache.get(
+                    _versioned_namespace(namespace), key_raw, max_age_seconds=max_disk_age
+                )
                 if disk_val is not None:
                     if _is_failure_output(disk_val):
                         # 污染条目按 miss 处理，让本次调用重新取数
@@ -198,7 +264,7 @@ def cached_data(
             if result is not None and not _is_failure_output(result):
                 _MEM_CACHE.set(key_raw, result, ttl=ttl_seconds)
                 if use_disk and isinstance(result, (str, dict, list, int, float, bool)):
-                    _DISK_CACHE.set(disk_ns, key_raw, result)
+                    disk_cache.set(_versioned_namespace(namespace), key_raw, result)
 
             return result
 
