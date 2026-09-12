@@ -153,6 +153,66 @@ def render_report(
             )
         )
 
+    # C1: 数据来源与证据（与 MD/PDF 同一渲染；旧报告显示未记录）
+    from tradingagents.evidence.display import render_evidence_md
+
+    with st.expander("🗂️ 数据来源与证据（抓取/过滤事实）", expanded=False):
+        st.markdown(
+            _display_report_text(
+                render_evidence_md(final_state.get("evidence_bundle")),
+                ticker,
+                final_state,
+            )
+        )
+
+    # C2: 研究假设卡（与 MD/PDF 同一渲染；旧报告显示未记录）
+    from tradingagents.agents.thesis import render_thesis_md
+
+    with st.expander("🧪 研究假设卡（结论结构化记录）", expanded=False):
+        st.markdown(
+            _display_report_text(
+                render_thesis_md(final_state.get("thesis_card")),
+                ticker,
+                final_state,
+            )
+        )
+
+    # D1: 可复算财务面板（与 MD/PDF 同一渲染；旧报告显示未记录）
+    from tradingagents.dataflows.financial_panel import render_financial_panel_md
+
+    with st.expander("🧮 财务面板（可复算）", expanded=False):
+        st.markdown(
+            _display_report_text(
+                render_financial_panel_md(final_state.get("financial_panel")),
+                ticker,
+                final_state,
+            )
+        )
+
+    # E: 独立初判与分歧核查（与 MD/PDF 同一渲染；旧报告显示未记录）
+    from tradingagents.agents.debate_evidence import render_evidence_debate_md
+
+    with st.expander("⚖️ 独立初判与分歧核查", expanded=False):
+        st.markdown(
+            _display_report_text(
+                render_evidence_debate_md(final_state),
+                ticker,
+                final_state,
+            )
+        )
+
+    # F2: 历史经验投影（与 MD/PDF 同一渲染；三态显示）
+    from tradingagents.evaluation.review_projection import render_projection_md
+
+    with st.expander("📚 历史经验投影（只读）", expanded=False):
+        st.markdown(
+            _display_report_text(
+                render_projection_md(final_state.get("review_projection")),
+                ticker,
+                final_state,
+            )
+        )
+
     inv_plan = final_state.get("investment_plan", "")
     if inv_plan:
         st.markdown("### 👔 最终投资建议（研究经理）")

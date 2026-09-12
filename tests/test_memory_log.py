@@ -797,14 +797,19 @@ class TestPortfolioManagerInjection:
     def test_pm_falls_back_to_freetext_when_structured_unavailable(self):
         """If a provider does not support with_structured_output, the agent
         falls back to a plain invoke and returns whatever prose the model
-        produced, so the pipeline never blocks."""
+        produced, so the pipeline never blocks. C2: the deterministic thesis
+        status line is appended after the prose (limited assessment for the
+        unstructured path — model text itself is untouched)."""
         plain_response = "**Rating**: Sell\n\nExit ahead of guidance."
         llm = MagicMock()
         llm.with_structured_output.side_effect = NotImplementedError("provider unsupported")
         llm.invoke.return_value = MagicMock(content=plain_response)
         pm_node = create_portfolio_manager(llm)
         result = pm_node(_make_pm_state())
-        assert result["final_trade_decision"] == plain_response
+        decision = result["final_trade_decision"]
+        assert decision.startswith(plain_response)
+        assert decision.count("🧪 研究假设卡评估") == 1
+        assert result["thesis_card"]["structured_output"] is False
 
     # get_past_context ordering and limits
 

@@ -1,0 +1,793 @@
+{
+  "arm_usage": {
+    "baseline": {
+      "missing": 1,
+      "planned": 8,
+      "totals": {
+        "http_requests": 7,
+        "llm_calls": 7,
+        "tokens": 70,
+        "tool_invocations": 0
+      },
+      "unknown_counts": {
+        "http_requests": 1,
+        "llm_calls": 1,
+        "tokens": 1,
+        "tool_invocations": 1
+      }
+    },
+    "candidate": {
+      "missing": 0,
+      "planned": 8,
+      "totals": {
+        "http_requests": 8,
+        "llm_calls": 8,
+        "tokens": 80,
+        "tool_invocations": 0
+      },
+      "unknown_counts": {
+        "http_requests": 0,
+        "llm_calls": 0,
+        "tokens": 0,
+        "tool_invocations": 0
+      }
+    }
+  },
+  "arms": {
+    "baseline": {
+      "brier": {
+        "reason": "Brier 未实现——按契约 #7 明确不支持，不声称 F3 完整包含校准",
+        "status": "not_applicable"
+      },
+      "counts": {
+        "completed": 7,
+        "completed_state_mismatch": 0,
+        "failed": 0,
+        "limited": 0,
+        "missing": 1,
+        "planned": 8,
+        "refused": 0
+      },
+      "direction_hit": {
+        "denominator": 7,
+        "eligible": 7,
+        "numerator": 7,
+        "pending": 0,
+        "unassessable": 0,
+        "unlabeled": 0,
+        "unverifiable": 0,
+        "value": 1.0
+      },
+      "e_inconclusive": {
+        "applicable": false,
+        "denominator": 0,
+        "eligible": 0,
+        "note": "该臂全部配置 E 未启用——not_applicable，不伪装观测值 0",
+        "numerator": 0,
+        "pending": 0,
+        "unassessable": 0,
+        "unlabeled": 0,
+        "unverifiable": 0,
+        "value": null
+      },
+      "e_unresolved": {
+        "applicable": false,
+        "denominator": 0,
+        "eligible": 0,
+        "note": "该臂全部配置 E 未启用——not_applicable，不伪装观测值 0",
+        "numerator": 0,
+        "pending": 0,
+        "unassessable": 0,
+        "unlabeled": 0,
+        "unverifiable": 0,
+        "value": null
+      },
+      "fact_support": {
+        "denominator": 7,
+        "eligible": 7,
+        "numerator": 4,
+        "pending": 0,
+        "unassessable": 0,
+        "unlabeled": 0,
+        "unverifiable": 0,
+        "value": 0.5714285714285714
+      },
+      "numeric_error": {
+        "denominator": 7,
+        "eligible": 7,
+        "numerator": 3,
+        "pending": 0,
+        "unassessable": 0,
+        "unlabeled": 0,
+        "unverifiable": 0,
+        "value": 0.42857142857142855
+      },
+      "temporal_violation": {
+        "denominator": 7,
+        "eligible": 7,
+        "numerator": 3,
+        "pending": 0,
+        "unassessable": 0,
+        "unlabeled": 0,
+        "unverifiable": 0,
+        "value": 0.42857142857142855
+      }
+    },
+    "candidate": {
+      "brier": {
+        "reason": "Brier 未实现——按契约 #7 明确不支持，不声称 F3 完整包含校准",
+        "status": "not_applicable"
+      },
+      "counts": {
+        "completed": 7,
+        "completed_state_mismatch": 0,
+        "failed": 0,
+        "limited": 0,
+        "missing": 0,
+        "planned": 8,
+        "refused": 1
+      },
+      "direction_hit": {
+        "denominator": 7,
+        "eligible": 7,
+        "numerator": 7,
+        "pending": 0,
+        "unassessable": 0,
+        "unlabeled": 0,
+        "unverifiable": 0,
+        "value": 1.0
+      },
+      "e_inconclusive": {
+        "denominator": 21,
+        "eligible": 21,
+        "numerator": 7,
+        "pending": 0,
+        "unassessable": 0,
+        "unlabeled": 0,
+        "unverifiable": 0,
+        "value": 0.3333333333333333
+      },
+      "e_unresolved": {
+        "denominator": 21,
+        "eligible": 21,
+        "numerator": 7,
+        "pending": 0,
+        "unassessable": 0,
+        "unlabeled": 0,
+        "unverifiable": 0,
+        "value": 0.3333333333333333
+      },
+      "fact_support": {
+        "denominator": 7,
+        "eligible": 7,
+        "numerator": 3,
+        "pending": 0,
+        "unassessable": 0,
+        "unlabeled": 0,
+        "unverifiable": 0,
+        "value": 0.42857142857142855
+      },
+      "numeric_error": {
+        "denominator": 7,
+        "eligible": 7,
+        "numerator": 4,
+        "pending": 0,
+        "unassessable": 0,
+        "unlabeled": 0,
+        "unverifiable": 0,
+        "value": 0.5714285714285714
+      },
+      "temporal_violation": {
+        "denominator": 7,
+        "eligible": 7,
+        "numerator": 4,
+        "pending": 0,
+        "unassessable": 0,
+        "unlabeled": 0,
+        "unverifiable": 0,
+        "value": 0.5714285714285714
+      }
+    }
+  },
+  "as_of": "2025-07-01",
+  "costs_by_currency": {
+    "per_arm": {
+      "baseline": {
+        "CNY": {
+          "entries": 7,
+          "known_total": "0.07",
+          "note": "仅已知条目之和；部分已知不冒充完整总成本"
+        }
+      },
+      "candidate": {
+        "CNY": {
+          "entries": 8,
+          "known_total": "0.08",
+          "note": "仅已知条目之和；部分已知不冒充完整总成本"
+        }
+      }
+    }
+  },
+  "disclaimer": "合成契约演示，不代表预测效果提高；准确度与覆盖率同报；盈利不等于推理正确。声明 generated_at 与摘要只证明输入自洽，不证明过去真的冻结或模型未偷看标签。",
+  "input_content_digests": {
+    "labels": "sha256:bf056395b49c3b6ef933943b99a763b3e1bccf1319ef5af9accd456e3d4a869e",
+    "predictions": "sha256:d391f48d7e4ecfba325c29fd9adf96faa0b4002873e8b6cf28164192fcc06d0d"
+  },
+  "input_digests": {
+    "labels": "sha256:135b575d289b7bd4489f26f4f90c55d565e1aaefadaa292f04f0589c3a6ccb01",
+    "plan": "sha256:6d8229a3f415209dbf5dba6049a7eb5083cf7af489886848d03d0cc380ea4817",
+    "predictions": "sha256:d7fd10d27e029dca4884a4e0ec9b88119c965413fc43c411655d33a540118102"
+  },
+  "invalid_labels": [],
+  "plan_digest": "sha256:7c91e79d6dbf2fa31066fe53777a884177b1bc2d95a8959212d2dd6c743fa7c5",
+  "planned_arm_runs": 16,
+  "repeat_summaries": {
+    "p:baseline:direction_hit": {
+      "effective_n": 2,
+      "mean": 1.0,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 1,
+          "value": 1.0
+        },
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 2,
+          "value": 1.0
+        }
+      ]
+    },
+    "p:baseline:e_inconclusive": {
+      "effective_n": 0,
+      "mean": null,
+      "n": 0,
+      "planned_n": 2,
+      "population_stddev": null,
+      "raw_per_repeat": [
+        {
+          "denominator": 0,
+          "feature_count": 0,
+          "numerator": 0,
+          "repeat_index": 1,
+          "value": null
+        },
+        {
+          "denominator": 0,
+          "feature_count": 0,
+          "numerator": 0,
+          "repeat_index": 2,
+          "value": null
+        }
+      ]
+    },
+    "p:baseline:e_unresolved": {
+      "effective_n": 0,
+      "mean": null,
+      "n": 0,
+      "planned_n": 2,
+      "population_stddev": null,
+      "raw_per_repeat": [
+        {
+          "denominator": 0,
+          "feature_count": 0,
+          "numerator": 0,
+          "repeat_index": 1,
+          "value": null
+        },
+        {
+          "denominator": 0,
+          "feature_count": 0,
+          "numerator": 0,
+          "repeat_index": 2,
+          "value": null
+        }
+      ]
+    },
+    "p:baseline:fact_support": {
+      "effective_n": 2,
+      "mean": 1.0,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 1,
+          "value": 1.0
+        },
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 2,
+          "value": 1.0
+        }
+      ]
+    },
+    "p:baseline:numeric_error": {
+      "effective_n": 2,
+      "mean": 0.0,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 0,
+          "repeat_index": 1,
+          "value": 0.0
+        },
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 0,
+          "repeat_index": 2,
+          "value": 0.0
+        }
+      ]
+    },
+    "p:baseline:temporal_violation": {
+      "effective_n": 2,
+      "mean": 0.0,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 0,
+          "repeat_index": 1,
+          "value": 0.0
+        },
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 0,
+          "repeat_index": 2,
+          "value": 0.0
+        }
+      ]
+    },
+    "p:candidate:direction_hit": {
+      "effective_n": 2,
+      "mean": 1.0,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 1,
+          "value": 1.0
+        },
+        {
+          "denominator": 1,
+          "feature_count": 1,
+          "numerator": 1,
+          "repeat_index": 2,
+          "value": 1.0
+        }
+      ]
+    },
+    "p:candidate:e_inconclusive": {
+      "effective_n": 2,
+      "mean": 0.3333333333333333,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 6,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 1,
+          "value": 0.3333333333333333
+        },
+        {
+          "denominator": 3,
+          "feature_count": 1,
+          "numerator": 1,
+          "repeat_index": 2,
+          "value": 0.3333333333333333
+        }
+      ]
+    },
+    "p:candidate:e_unresolved": {
+      "effective_n": 2,
+      "mean": 0.3333333333333333,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 6,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 1,
+          "value": 0.3333333333333333
+        },
+        {
+          "denominator": 3,
+          "feature_count": 1,
+          "numerator": 1,
+          "repeat_index": 2,
+          "value": 0.3333333333333333
+        }
+      ]
+    },
+    "p:candidate:fact_support": {
+      "effective_n": 2,
+      "mean": 1.0,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 1,
+          "value": 1.0
+        },
+        {
+          "denominator": 1,
+          "feature_count": 1,
+          "numerator": 1,
+          "repeat_index": 2,
+          "value": 1.0
+        }
+      ]
+    },
+    "p:candidate:numeric_error": {
+      "effective_n": 2,
+      "mean": 0.0,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 0,
+          "repeat_index": 1,
+          "value": 0.0
+        },
+        {
+          "denominator": 1,
+          "feature_count": 1,
+          "numerator": 0,
+          "repeat_index": 2,
+          "value": 0.0
+        }
+      ]
+    },
+    "p:candidate:temporal_violation": {
+      "effective_n": 2,
+      "mean": 0.0,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 0,
+          "repeat_index": 1,
+          "value": 0.0
+        },
+        {
+          "denominator": 1,
+          "feature_count": 1,
+          "numerator": 0,
+          "repeat_index": 2,
+          "value": 0.0
+        }
+      ]
+    },
+    "q:baseline:direction_hit": {
+      "effective_n": 2,
+      "mean": 1.0,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 1,
+          "value": 1.0
+        },
+        {
+          "denominator": 1,
+          "feature_count": 1,
+          "numerator": 1,
+          "repeat_index": 2,
+          "value": 1.0
+        }
+      ]
+    },
+    "q:baseline:e_inconclusive": {
+      "effective_n": 0,
+      "mean": null,
+      "n": 0,
+      "planned_n": 2,
+      "population_stddev": null,
+      "raw_per_repeat": [
+        {
+          "denominator": 0,
+          "feature_count": 0,
+          "numerator": 0,
+          "repeat_index": 1,
+          "value": null
+        },
+        {
+          "denominator": 0,
+          "feature_count": 0,
+          "numerator": 0,
+          "repeat_index": 2,
+          "value": null
+        }
+      ]
+    },
+    "q:baseline:e_unresolved": {
+      "effective_n": 0,
+      "mean": null,
+      "n": 0,
+      "planned_n": 2,
+      "population_stddev": null,
+      "raw_per_repeat": [
+        {
+          "denominator": 0,
+          "feature_count": 0,
+          "numerator": 0,
+          "repeat_index": 1,
+          "value": null
+        },
+        {
+          "denominator": 0,
+          "feature_count": 0,
+          "numerator": 0,
+          "repeat_index": 2,
+          "value": null
+        }
+      ]
+    },
+    "q:baseline:fact_support": {
+      "effective_n": 2,
+      "mean": 0.0,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 0,
+          "repeat_index": 1,
+          "value": 0.0
+        },
+        {
+          "denominator": 1,
+          "feature_count": 1,
+          "numerator": 0,
+          "repeat_index": 2,
+          "value": 0.0
+        }
+      ]
+    },
+    "q:baseline:numeric_error": {
+      "effective_n": 2,
+      "mean": 1.0,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 1,
+          "value": 1.0
+        },
+        {
+          "denominator": 1,
+          "feature_count": 1,
+          "numerator": 1,
+          "repeat_index": 2,
+          "value": 1.0
+        }
+      ]
+    },
+    "q:baseline:temporal_violation": {
+      "effective_n": 2,
+      "mean": 1.0,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 1,
+          "value": 1.0
+        },
+        {
+          "denominator": 1,
+          "feature_count": 1,
+          "numerator": 1,
+          "repeat_index": 2,
+          "value": 1.0
+        }
+      ]
+    },
+    "q:candidate:direction_hit": {
+      "effective_n": 2,
+      "mean": 1.0,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 1,
+          "value": 1.0
+        },
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 2,
+          "value": 1.0
+        }
+      ]
+    },
+    "q:candidate:e_inconclusive": {
+      "effective_n": 2,
+      "mean": 0.3333333333333333,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 6,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 1,
+          "value": 0.3333333333333333
+        },
+        {
+          "denominator": 6,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 2,
+          "value": 0.3333333333333333
+        }
+      ]
+    },
+    "q:candidate:e_unresolved": {
+      "effective_n": 2,
+      "mean": 0.3333333333333333,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 6,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 1,
+          "value": 0.3333333333333333
+        },
+        {
+          "denominator": 6,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 2,
+          "value": 0.3333333333333333
+        }
+      ]
+    },
+    "q:candidate:fact_support": {
+      "effective_n": 2,
+      "mean": 0.0,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 0,
+          "repeat_index": 1,
+          "value": 0.0
+        },
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 0,
+          "repeat_index": 2,
+          "value": 0.0
+        }
+      ]
+    },
+    "q:candidate:numeric_error": {
+      "effective_n": 2,
+      "mean": 1.0,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 1,
+          "value": 1.0
+        },
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 2,
+          "value": 1.0
+        }
+      ]
+    },
+    "q:candidate:temporal_violation": {
+      "effective_n": 2,
+      "mean": 1.0,
+      "n": 2,
+      "planned_n": 2,
+      "population_stddev": 0.0,
+      "raw_per_repeat": [
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 1,
+          "value": 1.0
+        },
+        {
+          "denominator": 2,
+          "feature_count": 2,
+          "numerator": 2,
+          "repeat_index": 2,
+          "value": 1.0
+        }
+      ]
+    }
+  },
+  "result_digest": "sha256:4341d89873af921d3831ba912dd2e9d9ec33f4a06a84306f97efe4bbf6562751",
+  "schema_version": 1,
+  "stage": "score",
+  "usage_totals": {
+    "http_requests": 15,
+    "llm_calls": 15,
+    "tokens": 150,
+    "tool_invocations": 0
+  },
+  "usage_unknown_counts": {
+    "http_requests": 1,
+    "llm_calls": 1,
+    "tokens": 1,
+    "tool_invocations": 1
+  }
+}

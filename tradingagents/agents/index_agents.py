@@ -42,6 +42,11 @@ from tradingagents.agents.report_quality import (
     append_limitation_notice,
     quality_context_for_prompt,
 )
+from tradingagents.agents.thesis import append_thesis_status, build_thesis_card
+from tradingagents.evidence.prompt_context import evidence_context_for_prompt
+from tradingagents.dataflows.financial_panel import panel_context_for_prompt
+from tradingagents.evaluation.review_projection import projection_for_prompt
+from tradingagents.agents.debate_evidence import evidence_debate_summary_for_prompt
 from tradingagents.dataflows.config import get_config
 from tradingagents.dataflows.index_registry import parse_index_ticker
 from tradingagents.agents.utils.signal_data_tools import (
@@ -466,6 +471,8 @@ def create_index_bull_researcher(llm):
         bull_history = debate.get("bull_history", "")
         current_response = debate.get("current_response", "")
         data_quality_summary = state.get("data_quality_summary", "")
+        # E: 独立初判与分歧核查受限摘要（未启用时空段）
+        e_debate_summary = evidence_debate_summary_for_prompt(state)
 
         reports = "\n\n".join(
             part
@@ -498,6 +505,8 @@ General bull points:
 Reports available:
 {reports}
 Data quality assessment: {data_quality_summary}
+Independent initial views & bounded recheck summary (reference/time validity ≠ semantic support; unresolved disagreements are listed — address them, do not assume they are settled):
+{e_debate_summary}
 Conversation history of the debate: {history}
 Last bear argument: {current_response}
 
@@ -528,6 +537,8 @@ def create_index_bear_researcher(llm):
         bear_history = debate.get("bear_history", "")
         current_response = debate.get("current_response", "")
         data_quality_summary = state.get("data_quality_summary", "")
+        # E: 独立初判与分歧核查受限摘要（未启用时空段）
+        e_debate_summary = evidence_debate_summary_for_prompt(state)
 
         reports = "\n\n".join(
             part
@@ -560,6 +571,8 @@ General bear points:
 Reports available:
 {reports}
 Data quality assessment: {data_quality_summary}
+Independent initial views & bounded recheck summary (reference/time validity ≠ semantic support; unresolved disagreements are listed — address them, do not assume they are settled):
+{e_debate_summary}
 Conversation history of the debate: {history}
 Last bull argument: {current_response}
 
@@ -615,6 +628,12 @@ def create_index_trader(llm):
         investment_plan = state["investment_plan"]
         # N01: 交易员直接获得质量限制（指数路径同个股路径）
         quality_block = quality_context_for_prompt(state)
+        # C1: 证据索引与覆盖限制（指数路径同个股路径；旧 state 空段）
+        evidence_block = evidence_context_for_prompt(state)
+        # D2: 财务面板投影（仅 ok 数值+实际依赖；未配置时空段）
+        panel_block = panel_context_for_prompt(state)
+        # F2: 历史经验只读投影（未启用/无效 → 空/受控说明）
+        review_block = projection_for_prompt(state)
 
         astock_context_parts = []
         if state.get("policy_report", ""):
@@ -643,6 +662,9 @@ def create_index_trader(llm):
                         else ""
                     )
                     + (quality_block + "\n" if quality_block else "")
+                    + (evidence_block + "\n" if evidence_block else "")
+                    + (panel_block + "\n" if panel_block else "")
+                    + (review_block + "\n" if review_block else "")
                     + "Leverage these insights to craft the directional view."
                     + get_language_instruction()
                 ),
@@ -687,6 +709,12 @@ def create_index_portfolio_manager(llm):
         trader_plan = state["trader_investment_plan"]
         # N01: 组合经理直接获得质量限制（指数路径）
         quality_block = quality_context_for_prompt(state)
+        # C1: 证据索引与覆盖限制（指数路径同个股路径；旧 state 空段）
+        evidence_block = evidence_context_for_prompt(state)
+        # D2: 财务面板投影（仅 ok 数值+实际依赖；未配置时空段）
+        panel_block = panel_context_for_prompt(state)
+        # F2: 历史经验只读投影（未启用/无效 → 空/受控说明）
+        review_block = projection_for_prompt(state)
 
         past_context = state.get("past_context", "")
         lessons_line = (
@@ -720,7 +748,7 @@ def create_index_portfolio_manager(llm):
 **Context:**
 - Research Manager's investment plan: **{research_plan}**
 - Trader's directional proposal: **{trader_plan}**
-{quality_block}{lessons_line}
+{quality_block}{evidence_block}{panel_block}{review_block}{lessons_line}
 **Risk Analysts Debate History:**
 {history}
 
@@ -728,13 +756,27 @@ def create_index_portfolio_manager(llm):
 
 Be decisive and ground every conclusion in specific evidence from the analysts.{no_levels_rule}{get_language_instruction()}"""
 
+        # C2: 捕获结构化决策对象（render 包装仅旁路保存），同一调用产出
+        # 文本与假设卡；自由文本回退时为 unknown 卡。指数语义：评级是整体
+        # 市场敞口方向观点，卡片不携带个股估值/仓位语义。
+        captured_decision = []
+
+        def _render_with_capture(decision):
+            captured_decision.append(decision)
+            return render_pm_decision(decision)
+
         final_trade_decision = invoke_structured_or_freetext(
-            structured_llm, llm, prompt, render_pm_decision, "Portfolio Manager"
+            structured_llm, llm, prompt, _render_with_capture, "Portfolio Manager"
         )
         # N01: 确定性质量提示（指数路径同个股路径；幂等、模型不遵循也不消失）
         final_trade_decision = append_limitation_notice(
             final_trade_decision, state.get("data_quality")
         )
+        # C2: 假设卡（确定性构建：引用校验/评估状态/uncalibrated 由代码生成）
+        thesis_card = build_thesis_card(
+            captured_decision[0] if captured_decision else None, state
+        )
+        final_trade_decision = append_thesis_status(final_trade_decision, thesis_card)
 
         new_risk_debate_state = {
             "judge_decision": final_trade_decision,
@@ -752,6 +794,8 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
         return {
             "risk_debate_state": new_risk_debate_state,
             "final_trade_decision": final_trade_decision,
+            # C2: 研究假设卡随 state 流转（指数路径同个股路径）
+            "thesis_card": thesis_card,
         }
 
     return portfolio_manager_node

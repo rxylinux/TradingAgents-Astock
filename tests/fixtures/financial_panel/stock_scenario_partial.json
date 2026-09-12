@@ -1,0 +1,55 @@
+{
+ "inputs": [
+  {
+   "input_id": "eps",
+   "metric": "eps_ttm",
+   "value": 12.5,
+   "unit": "CNY:yuan_per_share",
+   "currency": "CNY",
+   "scope": "consolidated",
+   "period": {
+    "kind": "ttm",
+    "window": "TTM",
+    "fiscal_year": 2024,
+    "period_start": "2023-10-01",
+    "period_end": "2024-09-30"
+   },
+   "disclosed_at": "2024-10-29",
+   "restated": false,
+   "supersedes": null,
+   "provenance": {
+    "offline_ref": "fixture:q3.json#eps"
+   }
+  },
+  {
+   "input_id": "mb",
+   "metric": "multiple_bear",
+   "value": 15,
+   "unit": "ratio:x",
+   "currency": "CNY",
+   "scope": "consolidated",
+   "period": null,
+   "disclosed_at": "2024-11-01",
+   "restated": false,
+   "supersedes": null,
+   "provenance": {
+    "offline_ref": "fixture:user#bear"
+   }
+  },
+  {
+   "input_id": "mba",
+   "metric": "multiple_base",
+   "value": 20,
+   "unit": "ratio:x",
+   "currency": "CNY",
+   "scope": "consolidated",
+   "period": null,
+   "disclosed_at": "2024-11-01",
+   "restated": false,
+   "supersedes": null,
+   "provenance": {
+    "offline_ref": "fixture:user#base"
+   }
+  }
+ ]
+}

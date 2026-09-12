@@ -654,6 +654,31 @@ def _collect_sections(
 
     sections.append(("报告质量卡", render_quality_card_md(final_state.get("data_quality"))))
 
+    # C1: 数据来源与证据（Web/MD/PDF 同一渲染；旧报告显示未记录）
+    from tradingagents.evidence.display import render_evidence_md
+
+    sections.append(("数据来源与证据", render_evidence_md(final_state.get("evidence_bundle"))))
+
+    # C2: 研究假设卡（Web/MD/PDF 同一渲染；旧报告显示未记录）
+    from tradingagents.agents.thesis import render_thesis_md
+
+    sections.append(("研究假设卡", render_thesis_md(final_state.get("thesis_card"))))
+
+    # D1: 可复算财务面板（Web/MD/PDF 同一渲染；旧报告显示未记录）
+    from tradingagents.dataflows.financial_panel import render_financial_panel_md
+
+    sections.append(("财务面板（可复算）", render_financial_panel_md(final_state.get("financial_panel"))))
+
+    # E: 独立初判与分歧核查（Web/MD/PDF 同一渲染；旧报告显示未记录）
+    from tradingagents.agents.debate_evidence import render_evidence_debate_md
+
+    sections.append(("独立初判与分歧核查", render_evidence_debate_md(final_state)))
+
+    # F2: 历史经验投影（Web/MD/PDF 同一渲染三态；旧报告显示未记录）
+    from tradingagents.evaluation.review_projection import render_projection_md
+
+    sections.append(("历史经验投影（只读）", render_projection_md(final_state.get("review_projection"))))
+
     for key, title in _REPORT_SECTIONS:
         content = final_state.get(key, "")
         if content:

@@ -202,6 +202,9 @@ cython_debug/
 # .vscode/
 .zcode/
 
+# WorkBuddy AI 工作区数据（与 .zcode/ 同类：本地 agent 状态，不入库）
+.workbuddy-ai/
+
 # Ruff stuff:
 .ruff_cache/
 

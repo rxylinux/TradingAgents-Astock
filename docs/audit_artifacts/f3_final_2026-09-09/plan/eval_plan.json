@@ -1,0 +1,273 @@
+{
+  "embargo_days": 0,
+  "excluded_unassigned": [],
+  "input_digests": {
+    "features": "sha256:515b23f18e8ec3bff2522e5e2661402eb42c42bb670222cca0399513a896d400",
+    "splits": "sha256:7861f345f93776400ca02f7945ddef83bf38a45c7e051d40c3a792569aec82f2",
+    "trials": "sha256:78bca2295a6cb42d610aa14b2863f122dcd74e6bad3dd7d38c055582869ecfde"
+  },
+  "plan_digest": "sha256:7c91e79d6dbf2fa31066fe53777a884177b1bc2d95a8959212d2dd6c743fa7c5",
+  "plan_entries": [
+    {
+      "baseline_config_digest": "sha256:e6614847ee64f5561e7afa5081d9611c973596d4da3069230a35367ecfad5547",
+      "candidate_config_digest": "sha256:46a011eb1547fe4183875bbe52c6ef309ccbab098d8f3ec562422e5727f2437e",
+      "feature_id": "f",
+      "feature_snapshot": {
+        "binary_event": null,
+        "decision": {
+          "decided_at": "2024-02-27",
+          "prediction_horizon": "explicit",
+          "rating": "Buy"
+        },
+        "feature_available_at": "2024-02-28",
+        "feature_id": "f",
+        "instrument_type": "stock",
+        "prediction_at": "2024-03-01",
+        "target_window": {
+          "end": "2024-06-01",
+          "start": "2024-03-02"
+        },
+        "ticker": "600519"
+      },
+      "feature_snapshot_digest": "sha256:b8c54bcb5039266db47ede80a8d33c6c3a3c49fadb1dd7cefa796ca35afac3ad",
+      "pair_id": "p",
+      "repeat_index": 1,
+      "split": "train"
+    },
+    {
+      "baseline_config_digest": "sha256:e6614847ee64f5561e7afa5081d9611c973596d4da3069230a35367ecfad5547",
+      "candidate_config_digest": "sha256:46a011eb1547fe4183875bbe52c6ef309ccbab098d8f3ec562422e5727f2437e",
+      "feature_id": "f",
+      "feature_snapshot": {
+        "binary_event": null,
+        "decision": {
+          "decided_at": "2024-02-27",
+          "prediction_horizon": "explicit",
+          "rating": "Buy"
+        },
+        "feature_available_at": "2024-02-28",
+        "feature_id": "f",
+        "instrument_type": "stock",
+        "prediction_at": "2024-03-01",
+        "target_window": {
+          "end": "2024-06-01",
+          "start": "2024-03-02"
+        },
+        "ticker": "600519"
+      },
+      "feature_snapshot_digest": "sha256:b8c54bcb5039266db47ede80a8d33c6c3a3c49fadb1dd7cefa796ca35afac3ad",
+      "pair_id": "p",
+      "repeat_index": 2,
+      "split": "train"
+    },
+    {
+      "baseline_config_digest": "sha256:e6614847ee64f5561e7afa5081d9611c973596d4da3069230a35367ecfad5547",
+      "candidate_config_digest": "sha256:46a011eb1547fe4183875bbe52c6ef309ccbab098d8f3ec562422e5727f2437e",
+      "feature_id": "g",
+      "feature_snapshot": {
+        "binary_event": null,
+        "decision": {
+          "decided_at": "2024-02-27",
+          "prediction_horizon": "explicit",
+          "rating": "Buy"
+        },
+        "feature_available_at": "2024-02-28",
+        "feature_id": "g",
+        "instrument_type": "stock",
+        "prediction_at": "2024-03-01",
+        "target_window": {
+          "end": "2024-06-01",
+          "start": "2024-03-02"
+        },
+        "ticker": "600519"
+      },
+      "feature_snapshot_digest": "sha256:f64b3e6df02e9d2c6bea65301aabe2e02b6e2591735d775b510ea4b830d65cc0",
+      "pair_id": "p",
+      "repeat_index": 1,
+      "split": "train"
+    },
+    {
+      "baseline_config_digest": "sha256:e6614847ee64f5561e7afa5081d9611c973596d4da3069230a35367ecfad5547",
+      "candidate_config_digest": "sha256:46a011eb1547fe4183875bbe52c6ef309ccbab098d8f3ec562422e5727f2437e",
+      "feature_id": "g",
+      "feature_snapshot": {
+        "binary_event": null,
+        "decision": {
+          "decided_at": "2024-02-27",
+          "prediction_horizon": "explicit",
+          "rating": "Buy"
+        },
+        "feature_available_at": "2024-02-28",
+        "feature_id": "g",
+        "instrument_type": "stock",
+        "prediction_at": "2024-03-01",
+        "target_window": {
+          "end": "2024-06-01",
+          "start": "2024-03-02"
+        },
+        "ticker": "600519"
+      },
+      "feature_snapshot_digest": "sha256:f64b3e6df02e9d2c6bea65301aabe2e02b6e2591735d775b510ea4b830d65cc0",
+      "pair_id": "p",
+      "repeat_index": 2,
+      "split": "train"
+    },
+    {
+      "baseline_config_digest": "sha256:e6614847ee64f5561e7afa5081d9611c973596d4da3069230a35367ecfad5547",
+      "candidate_config_digest": "sha256:46a011eb1547fe4183875bbe52c6ef309ccbab098d8f3ec562422e5727f2437e",
+      "feature_id": "f",
+      "feature_snapshot": {
+        "binary_event": null,
+        "decision": {
+          "decided_at": "2024-02-27",
+          "prediction_horizon": "explicit",
+          "rating": "Buy"
+        },
+        "feature_available_at": "2024-02-28",
+        "feature_id": "f",
+        "instrument_type": "stock",
+        "prediction_at": "2024-03-01",
+        "target_window": {
+          "end": "2024-06-01",
+          "start": "2024-03-02"
+        },
+        "ticker": "600519"
+      },
+      "feature_snapshot_digest": "sha256:b8c54bcb5039266db47ede80a8d33c6c3a3c49fadb1dd7cefa796ca35afac3ad",
+      "pair_id": "q",
+      "repeat_index": 1,
+      "split": "train"
+    },
+    {
+      "baseline_config_digest": "sha256:e6614847ee64f5561e7afa5081d9611c973596d4da3069230a35367ecfad5547",
+      "candidate_config_digest": "sha256:46a011eb1547fe4183875bbe52c6ef309ccbab098d8f3ec562422e5727f2437e",
+      "feature_id": "f",
+      "feature_snapshot": {
+        "binary_event": null,
+        "decision": {
+          "decided_at": "2024-02-27",
+          "prediction_horizon": "explicit",
+          "rating": "Buy"
+        },
+        "feature_available_at": "2024-02-28",
+        "feature_id": "f",
+        "instrument_type": "stock",
+        "prediction_at": "2024-03-01",
+        "target_window": {
+          "end": "2024-06-01",
+          "start": "2024-03-02"
+        },
+        "ticker": "600519"
+      },
+      "feature_snapshot_digest": "sha256:b8c54bcb5039266db47ede80a8d33c6c3a3c49fadb1dd7cefa796ca35afac3ad",
+      "pair_id": "q",
+      "repeat_index": 2,
+      "split": "train"
+    },
+    {
+      "baseline_config_digest": "sha256:e6614847ee64f5561e7afa5081d9611c973596d4da3069230a35367ecfad5547",
+      "candidate_config_digest": "sha256:46a011eb1547fe4183875bbe52c6ef309ccbab098d8f3ec562422e5727f2437e",
+      "feature_id": "g",
+      "feature_snapshot": {
+        "binary_event": null,
+        "decision": {
+          "decided_at": "2024-02-27",
+          "prediction_horizon": "explicit",
+          "rating": "Buy"
+        },
+        "feature_available_at": "2024-02-28",
+        "feature_id": "g",
+        "instrument_type": "stock",
+        "prediction_at": "2024-03-01",
+        "target_window": {
+          "end": "2024-06-01",
+          "start": "2024-03-02"
+        },
+        "ticker": "600519"
+      },
+      "feature_snapshot_digest": "sha256:f64b3e6df02e9d2c6bea65301aabe2e02b6e2591735d775b510ea4b830d65cc0",
+      "pair_id": "q",
+      "repeat_index": 1,
+      "split": "train"
+    },
+    {
+      "baseline_config_digest": "sha256:e6614847ee64f5561e7afa5081d9611c973596d4da3069230a35367ecfad5547",
+      "candidate_config_digest": "sha256:46a011eb1547fe4183875bbe52c6ef309ccbab098d8f3ec562422e5727f2437e",
+      "feature_id": "g",
+      "feature_snapshot": {
+        "binary_event": null,
+        "decision": {
+          "decided_at": "2024-02-27",
+          "prediction_horizon": "explicit",
+          "rating": "Buy"
+        },
+        "feature_available_at": "2024-02-28",
+        "feature_id": "g",
+        "instrument_type": "stock",
+        "prediction_at": "2024-03-01",
+        "target_window": {
+          "end": "2024-06-01",
+          "start": "2024-03-02"
+        },
+        "ticker": "600519"
+      },
+      "feature_snapshot_digest": "sha256:f64b3e6df02e9d2c6bea65301aabe2e02b6e2591735d775b510ea4b830d65cc0",
+      "pair_id": "q",
+      "repeat_index": 2,
+      "split": "train"
+    }
+  ],
+  "planned_arm_runs": 16,
+  "purged_overlaps": [],
+  "schema_version": 1,
+  "split_order": [
+    "train",
+    "validation",
+    "holdout"
+  ],
+  "splits": {
+    "holdout": {
+      "end": "2025-12-31",
+      "start": "2025-01-01"
+    },
+    "train": {
+      "end": "2024-06-30",
+      "start": "2024-01-01"
+    },
+    "validation": {
+      "end": "2024-12-31",
+      "start": "2024-07-01"
+    }
+  },
+  "stage": "prepare",
+  "trials": {
+    "p": {
+      "baseline_config": {
+        "evidence_debate_enabled": false,
+        "model": "offline"
+      },
+      "baseline_config_digest": "sha256:e6614847ee64f5561e7afa5081d9611c973596d4da3069230a35367ecfad5547",
+      "candidate_config": {
+        "evidence_debate_enabled": true,
+        "model": "offline"
+      },
+      "candidate_config_digest": "sha256:46a011eb1547fe4183875bbe52c6ef309ccbab098d8f3ec562422e5727f2437e",
+      "pair_id": "p",
+      "repeat_count": 2
+    },
+    "q": {
+      "baseline_config": {
+        "evidence_debate_enabled": false,
+        "model": "offline"
+      },
+      "baseline_config_digest": "sha256:e6614847ee64f5561e7afa5081d9611c973596d4da3069230a35367ecfad5547",
+      "candidate_config": {
+        "evidence_debate_enabled": true,
+        "model": "offline"
+      },
+      "candidate_config_digest": "sha256:46a011eb1547fe4183875bbe52c6ef309ccbab098d8f3ec562422e5727f2437e",
+      "pair_id": "q",
+      "repeat_count": 2
+    }
+  }
+}

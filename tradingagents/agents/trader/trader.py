@@ -9,6 +9,9 @@ from langchain_core.messages import AIMessage
 from tradingagents.agents.schemas import TraderProposal, render_trader_proposal
 from tradingagents.agents.utils.agent_utils import build_instrument_context, get_language_instruction
 from tradingagents.agents.report_quality import quality_context_for_prompt
+from tradingagents.evidence.prompt_context import evidence_context_for_prompt
+from tradingagents.dataflows.financial_panel import panel_context_for_prompt
+from tradingagents.evaluation.review_projection import projection_for_prompt
 from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
@@ -31,6 +34,12 @@ def create_trader(llm):
         investment_plan = state["investment_plan"]
         # N01: 交易员直接获得质量限制（不依赖辩论转述）
         quality_block = quality_context_for_prompt(state)
+        # C1: 证据索引（旧 state 无证据账本时空段）
+        evidence_block = evidence_context_for_prompt(state)
+        # D2: 财务面板投影（仅 ok 数值+实际依赖；未配置时空段）
+        panel_block = panel_context_for_prompt(state)
+        # F2: 历史经验只读投影（未启用/无效 → 空/受控说明）
+        review_block = projection_for_prompt(state)
 
         # Collect A-stock specific analyst reports
         policy_report = state.get("policy_report", "")
@@ -81,6 +90,9 @@ def create_trader(llm):
                     f"Proposed Investment Plan:\n{investment_plan}\n\n"
                     + (f"Additional A-Stock Analyst Context:\n{astock_context}\n\n" if astock_context else "")
                     + (quality_block + "\n" if quality_block else "")
+                    + (evidence_block + "\n" if evidence_block else "")
+                    + (panel_block + "\n" if panel_block else "")
+                    + (review_block + "\n" if review_block else "")
                     + "Leverage these insights to craft the transaction view."
                     + get_language_instruction()
                 ),

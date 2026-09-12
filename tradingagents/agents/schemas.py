@@ -19,7 +19,7 @@ so that:
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -189,6 +189,84 @@ class PortfolioDecision(BaseModel):
         default=None,
         description="Optional analysis horizon, e.g. '3-6 months'.",
     )
+
+    # ---- C2 research thesis card -----------------------------------------
+    # All optional with empty defaults: a provider/model that omits them
+    # yields "unknown" card fields — nothing is ever fabricated by code.
+    # These ride the Portfolio Manager's EXISTING structured-output call;
+    # no extra LLM call is added for the format.
+    supporting_evidence_ids: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Evidence IDs from the 证据索引 block in the prompt that SUPPORT "
+            "the thesis. Only cite IDs that appear there verbatim; if the "
+            "block is absent or none apply, return an empty list."
+        ),
+    )
+    contradicting_evidence_ids: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Evidence IDs from the 证据索引 block that CONTRADICT or weaken "
+            "the thesis (bear-side facts). Only cite IDs that appear there "
+            "verbatim; empty list if none."
+        ),
+    )
+    hypotheses_to_verify: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Assumptions the thesis depends on that are NOT yet verified by "
+            "the evidence above. Empty list if none identified."
+        ),
+    )
+    catalysts: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Observable upcoming events that would materially move the "
+            "thesis. Do NOT invent specific earnings dates, prices, or "
+            "probabilities — only events already named in the analysts' "
+            "reports or evidence."
+        ),
+    )
+    invalidation_conditions: List["ThesisCondition"] = Field(
+        default_factory=list,
+        description=(
+            "Conditions under which this thesis should be abandoned. Prefer "
+            "observable metric conditions (indicator + comparator + "
+            "threshold + period, e.g. '经营现金流 同比 < 0 下一已披露季度'); "
+            "free-text-only conditions are allowed but will be marked for "
+            "manual review. Empty list if none."
+        ),
+    )
+    next_check_trigger: Optional[str] = Field(
+        default=None,
+        description=(
+            "When this thesis should be re-examined, anchored to an "
+            "observable trigger already named in the analysis (e.g. an "
+            "event or report); 'unknown' if nothing observable is available."
+        ),
+    )
+
+
+class ThesisCondition(BaseModel):
+    """One thesis-invalidation condition (C2).
+
+    ``observable``/``manual_review`` are NOT model fields — code derives
+    them from whether the measurable parts are present.
+    """
+
+    description: str = Field(description="The condition in one sentence.")
+    indicator: Optional[str] = Field(
+        default=None, description="Metric to watch, e.g. 经营现金流.")
+    comparator: Optional[str] = Field(
+        default=None, description="Comparison, e.g. 同比转负 / < / ≥.")
+    threshold: Optional[str] = Field(
+        default=None, description="Threshold value, e.g. 0 / -20%.")
+    period: Optional[str] = Field(
+        default=None, description="Period or trigger event, e.g. 下一已披露季度.")
+    source: Optional[str] = Field(
+        default=None, description="Where this will be observable, e.g. 季报.")
+    evidence_id: Optional[str] = Field(
+        default=None, description="Supporting evidence ID from 证据索引, if any.")
 
 
 def render_pm_decision(decision: PortfolioDecision) -> str:

@@ -33,6 +33,8 @@ from .a_stock import (
     get_income_statement as get_astock_income_statement,
     get_news as get_astock_news,
     get_global_news as get_astock_global_news,
+    get_news_with_evidence,
+    get_global_news_with_evidence,
     get_insider_transactions as get_astock_insider_transactions,
     get_profit_forecast as get_astock_profit_forecast,
     get_hot_stocks as get_astock_hot_stocks,
@@ -46,6 +48,8 @@ from .a_stock import (
 
 # Configuration and routing logic
 from .config import get_config
+from .cache_utils import DataFailure
+from tradingagents.evidence.ledger import SCHEMA_ARTIFACT
 
 # Tools organized by category
 TOOLS_CATEGORIES = {
@@ -235,5 +239,90 @@ def route_to_vendor(method: str, *args, **kwargs):
             return impl_func(*args, **kwargs)
         except AlphaVantageRateLimitError:
             continue  # Only rate limits trigger fallback
+
+    raise RuntimeError(f"No available vendor for '{method}'")
+
+
+# Evidence-capable twins: vendors that can produce (text, artifact) from the
+# SAME fetch. Vendors absent here still get routed to (never bypassed) —
+# their plain string output is wrapped as a provenance-unknown artifact.
+VENDOR_METHODS_WITH_EVIDENCE = {
+    "get_news": {
+        "a_stock": get_news_with_evidence,
+    },
+    "get_global_news": {
+        "a_stock": get_global_news_with_evidence,
+    },
+}
+
+
+def _unknown_artifact(method: str, vendor: str, text) -> dict:
+    """Wrap a plain string vendor result as a provenance-unknown artifact.
+
+    The text is never parsed into records — an old string vendor cannot
+    provide structured provenance and must not be guessed into strong
+    evidence (C1 contract).
+    """
+    if isinstance(text, DataFailure):
+        status = "failed"
+        note = f"供应商 {vendor} 返回数据缺失标记（无结构化来源元数据）"
+    else:
+        status = "successful"
+        note = f"供应商 {vendor} 仅返回文本，无结构化来源元数据（provenance unknown）"
+    return {
+        "schema": SCHEMA_ARTIFACT,
+        "tool": method,
+        "provenance": "unknown",
+        "status": status,
+        "requested_window": None,
+        "records": [],
+        "source_statuses": [],
+        "exclusions": {},
+        "coverage_notes": [note],
+    }
+
+
+def route_to_vendor_with_evidence(method: str, *args, **kwargs):
+    """Route exactly like ``route_to_vendor``, asking for (text, artifact).
+
+    Chain semantics mirror ``route_to_vendor`` (index seam first, configured
+    tool/category vendors with the same fallback order, rate-limit-only
+    fallback). Vendors with an evidence twin return ``(text, artifact)``
+    from one fetch; string-only vendors return their text wrapped in a
+    provenance-unknown artifact.
+    """
+    from .index_data import try_route_index
+
+    _handled, _result = try_route_index(method, *args, **kwargs)
+    if _handled:
+        return _result, _unknown_artifact(method, "index_data", _result)
+
+    category = get_category_for_method(method)
+    vendor_config = get_vendor(category, method)
+    primary_vendors = [v.strip() for v in vendor_config.split(',')]
+
+    if method not in VENDOR_METHODS:
+        raise ValueError(f"Method '{method}' not supported")
+
+    all_available_vendors = list(VENDOR_METHODS[method].keys())
+    fallback_vendors = primary_vendors.copy()
+    for vendor in all_available_vendors:
+        if vendor not in fallback_vendors:
+            fallback_vendors.append(vendor)
+
+    for vendor in fallback_vendors:
+        if vendor not in VENDOR_METHODS[method]:
+            continue
+
+        try:
+            twin = VENDOR_METHODS_WITH_EVIDENCE.get(method, {}).get(vendor)
+            if twin is not None:
+                return twin(*args, **kwargs)
+            vendor_impl = VENDOR_METHODS[method][vendor]
+            impl_func = vendor_impl[0] if isinstance(vendor_impl, list) else vendor_impl
+            text = impl_func(*args, **kwargs)
+        except AlphaVantageRateLimitError:
+            continue  # Only rate limits trigger fallback — same rule for twins
+        return text, _unknown_artifact(method, vendor, text)
 
     raise RuntimeError(f"No available vendor for '{method}'")

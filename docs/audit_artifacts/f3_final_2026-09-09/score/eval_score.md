@@ -1,0 +1,48 @@
+**离线配对评估报告（F3 score）**：
+- as_of=2025-07-01；plan=`sha256:7c91e79d6dbf2fa31066fe53777a884177b1bc2d95a8959212d2dd6c743fa7c5`；planned_arm_runs=16
+- **baseline**: planned=8 missing=1 failed=0 refused=0 limited=0 completed=7（completed=结构化结论产出，≠正确、≠非拒答）
+  - fact_support: 4/7 = 0.5714（分母0为null；覆盖: eligible=7 unlabeled=0 unassessable=0）
+  - numeric_error: 3/7 = 0.4286（分母0为null；覆盖: eligible=7 unlabeled=0 unassessable=0）
+  - temporal_violation: 3/7 = 0.4286（分母0为null；覆盖: eligible=7 unlabeled=0 unassessable=0）
+  - e_unresolved: 0/0 = null（分母0为null；覆盖: eligible=0 unlabeled=0 unassessable=0）
+  - e_inconclusive: 0/0 = null（分母0为null；覆盖: eligible=0 unlabeled=0 unassessable=0）
+  - direction_hit: 7/7 = 1.0000（分母0为null；覆盖: eligible=7 unlabeled=0 unassessable=0）
+  - Brier: not_applicable（Brier 未实现——按契约 #7 明确不支持，不声称 F3 完整包含校准）
+- **candidate**: planned=8 missing=0 failed=0 refused=1 limited=0 completed=7（completed=结构化结论产出，≠正确、≠非拒答）
+  - fact_support: 3/7 = 0.4286（分母0为null；覆盖: eligible=7 unlabeled=0 unassessable=0）
+  - numeric_error: 4/7 = 0.5714（分母0为null；覆盖: eligible=7 unlabeled=0 unassessable=0）
+  - temporal_violation: 4/7 = 0.5714（分母0为null；覆盖: eligible=7 unlabeled=0 unassessable=0）
+  - e_unresolved: 7/21 = 0.3333（分母0为null；覆盖: eligible=21 unlabeled=0 unassessable=0）
+  - e_inconclusive: 7/21 = 0.3333（分母0为null；覆盖: eligible=21 unlabeled=0 unassessable=0）
+  - direction_hit: 7/7 = 1.0000（分母0为null；覆盖: eligible=7 unlabeled=0 unassessable=0）
+  - Brier: not_applicable（Brier 未实现——按契约 #7 明确不支持，不声称 F3 完整包含校准）
+- 重复汇总（每 repeat 先在 repeat 内聚合 features；总体标准差 ÷N，无置信区间，不挑最好一次；零效行保留）:
+  - p:baseline:direction_hit: mean=1.0000 stddev=0.0000 effective_n=2/2（计划重复数）
+  - p:baseline:e_inconclusive: 零有效重复（0/2）——全部分母为 0，值 null 不造 0
+  - p:baseline:e_unresolved: 零有效重复（0/2）——全部分母为 0，值 null 不造 0
+  - p:baseline:fact_support: mean=1.0000 stddev=0.0000 effective_n=2/2（计划重复数）
+  - p:baseline:numeric_error: mean=0.0000 stddev=0.0000 effective_n=2/2（计划重复数）
+  - p:baseline:temporal_violation: mean=0.0000 stddev=0.0000 effective_n=2/2（计划重复数）
+  - p:candidate:direction_hit: mean=1.0000 stddev=0.0000 effective_n=2/2（计划重复数）
+  - p:candidate:e_inconclusive: mean=0.3333 stddev=0.0000 effective_n=2/2（计划重复数）
+  - p:candidate:e_unresolved: mean=0.3333 stddev=0.0000 effective_n=2/2（计划重复数）
+  - p:candidate:fact_support: mean=1.0000 stddev=0.0000 effective_n=2/2（计划重复数）
+  - p:candidate:numeric_error: mean=0.0000 stddev=0.0000 effective_n=2/2（计划重复数）
+  - p:candidate:temporal_violation: mean=0.0000 stddev=0.0000 effective_n=2/2（计划重复数）
+  - q:baseline:direction_hit: mean=1.0000 stddev=0.0000 effective_n=2/2（计划重复数）
+  - q:baseline:e_inconclusive: 零有效重复（0/2）——全部分母为 0，值 null 不造 0
+  - q:baseline:e_unresolved: 零有效重复（0/2）——全部分母为 0，值 null 不造 0
+  - q:baseline:fact_support: mean=0.0000 stddev=0.0000 effective_n=2/2（计划重复数）
+  - q:baseline:numeric_error: mean=1.0000 stddev=0.0000 effective_n=2/2（计划重复数）
+  - q:baseline:temporal_violation: mean=1.0000 stddev=0.0000 effective_n=2/2（计划重复数）
+  - q:candidate:direction_hit: mean=1.0000 stddev=0.0000 effective_n=2/2（计划重复数）
+  - q:candidate:e_inconclusive: mean=0.3333 stddev=0.0000 effective_n=2/2（计划重复数）
+  - q:candidate:e_unresolved: mean=0.3333 stddev=0.0000 effective_n=2/2（计划重复数）
+  - q:candidate:fact_support: mean=0.0000 stddev=0.0000 effective_n=2/2（计划重复数）
+  - q:candidate:numeric_error: mean=1.0000 stddev=0.0000 effective_n=2/2（计划重复数）
+  - q:candidate:temporal_violation: mean=1.0000 stddev=0.0000 effective_n=2/2（计划重复数）
+- usage: llm=15（unknown×1） http=15（unknown×1） tools=0 tokens=150（四类不混算）
+- 成本（每臂分开，按币种分桶，Decimal 精确；混合币种不相加）:
+  - baseline CNY: 0.07（7 条已知）
+  - candidate CNY: 0.08（8 条已知）
+> 合成契约演示，不代表预测效果提高；准确度与覆盖率同报；盈利不等于推理正确。声明 generated_at 与摘要只证明输入自洽，不证明过去真的冻结或模型未偷看标签。

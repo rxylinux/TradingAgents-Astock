@@ -1,6 +1,7 @@
 
 
 from tradingagents.agents.utils.agent_utils import get_language_instruction
+from tradingagents.agents.debate_evidence import evidence_debate_summary_for_prompt
 
 
 def create_bear_researcher(llm):
@@ -18,6 +19,8 @@ def create_bear_researcher(llm):
         hot_money_report = state.get("hot_money_report", "")
         lockup_report = state.get("lockup_report", "")
         data_quality_summary = state.get("data_quality_summary", "")
+        # E: 独立初判与分歧核查受限摘要（未启用时空段；含未解决分歧与缺口）
+        e_debate_summary = evidence_debate_summary_for_prompt(state)
 
         prompt = f"""You are a Bear Analyst making the case against investing in this A-share (China mainland) stock. Your goal is to present a well-reasoned argument emphasizing risks, challenges, and negative indicators unique to the Chinese market. Leverage the provided research and data to highlight potential downsides and counter bullish arguments effectively.
 
@@ -45,6 +48,8 @@ Policy analysis report: {policy_report}
 Hot money / capital flow report: {hot_money_report}
 Lockup expiry / insider reduction report: {lockup_report}
 Data quality assessment: {data_quality_summary}
+Independent initial views & bounded recheck summary (reference/time validity ≠ semantic support; unresolved disagreements are listed — address them, do not assume they are settled):
+{e_debate_summary}
 Conversation history of the debate: {history}
 Last bull argument: {current_response}
 

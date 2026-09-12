@@ -2,6 +2,7 @@ import logging
 import os
 import random
 import time
+from contextvars import ContextVar
 from typing import Any, Optional
 
 from langchain_core.messages import AIMessage
@@ -13,43 +14,92 @@ from .validators import validate_model
 
 logger = logging.getLogger(__name__)
 
+# Invocation-local shared retry budget (B1 v3).
+# When set (non-None), NormalizedChatOpenAI.invoke() makes exactly 1 HTTP
+# request without internal retry — the caller (invoke_structured_or_freetext)
+# manages all retries and decrements this budget. Thread-safe via ContextVar.
+_shared_budget: ContextVar[Optional[int]] = ContextVar("llm_shared_budget", default=None)
+
+# ── Retry classification (by exception type, not error-string matching) ──
+
+_RETRYABLE_TYPES: tuple = ()
+_NON_RETRYABLE_TYPES: tuple = ()
+try:
+    from openai import (
+        APIConnectionError,
+        APITimeoutError,
+        AuthenticationError,
+        BadRequestError,
+        InternalServerError,
+        PermissionDeniedError,
+        RateLimitError,
+    )
+    _RETRYABLE_TYPES = (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError)
+    _NON_RETRYABLE_TYPES = (AuthenticationError, PermissionDeniedError, BadRequestError)
+except ImportError:
+    pass
+
 
 class NormalizedChatOpenAI(ChatOpenAI):
-    """ChatOpenAI with normalized content output and automatic rate-limit backoff.
+    """ChatOpenAI with normalized content output and invocation-local retries.
 
-    The Responses API returns content as a list of typed blocks
-    (reasoning, text, etc.). ``invoke`` normalizes to string for
-    consistent downstream handling. ``with_structured_output`` defaults
-    to function-calling so the Responses-API parse path is avoided
-    (langchain-openai's parse path emits noisy
-    PydanticSerializationUnexpectedValue warnings per call without
-    affecting correctness).
+    SDK's ``max_retries`` is statically set to 0 — ALL retries are managed
+    by ``invoke()`` using the user's configured budget (total HTTP requests
+    = 1 + user's max_retries). This eliminates the multiplicative explosion
+    and enables the structured-output fallback to share the same budget
+    without mutating any shared state.
 
-    Provider-specific quirks (e.g. DeepSeek's thinking mode) live in
-    purpose-built subclasses below so this base class stays small.
+    The user's ``max_retries`` is preserved in ``self._user_max_retries``
+    (private attr, not a Pydantic field) so the SDK gets 0 while invoke()
+    uses the correct budget.
     """
 
+    def model_post_init(self, __context):
+        """Statically zero SDK retries; save user budget for invoke()."""
+        super().model_post_init(__context)
+        self.__dict__["_user_max_retries"] = self.max_retries
+        object.__setattr__(self, "max_retries", 0)
+        try:
+            rc = getattr(self, "root_client", None)
+            if rc is not None and hasattr(rc, "max_retries"):
+                rc.max_retries = 0
+        except Exception:
+            pass
+
+    def _get_retry_budget(self) -> int:
+        """Total HTTP attempts per invocation (1 + user max_retries)."""
+        return self.__dict__.get("_user_max_retries", 0) + 1
+
     def invoke(self, input, config=None, **kwargs):
-        max_attempts = 5
-        for attempt in range(1, max_attempts + 1):
+        """Invoke with retries — total requests = 1 + _user_max_retries.
+
+        When a shared budget is active (set by invoke_structured_or_freetext),
+        makes exactly 1 request without retry — the caller manages retries.
+        Standalone calls use their own budget from _user_max_retries.
+        """
+        # Shared budget mode: 1 request, caller manages retries
+        if _shared_budget.get() is not None:
+            response = super().invoke(input, config, **kwargs)
+            warn_if_truncated(response, self.model_name)
+            return normalize_content(response)
+
+        # Standalone mode: own retry loop
+        max_attempts = self._get_retry_budget()
+        for attempt in range(max_attempts):
             try:
                 response = super().invoke(input, config, **kwargs)
                 warn_if_truncated(response, self.model_name)
                 return normalize_content(response)
+            except _NON_RETRYABLE_TYPES:
+                raise
             except Exception as e:
-                err_str = str(e)
-                is_rate_limit = (
-                    "429" in err_str
-                    or "1302" in err_str
-                    or "RateLimitError" in type(e).__name__
-                    or "速率限制" in err_str
-                    or "rate limit" in err_str.lower()
-                )
-                if is_rate_limit and attempt < max_attempts:
+                if not isinstance(e, _RETRYABLE_TYPES):
+                    raise
+                if attempt < max_attempts - 1:
                     sleep_time = (2 ** attempt) + random.uniform(0.5, 1.5)
                     logger.warning(
-                        "LLM call rate-limited for %s (attempt %d/%d). Sleeping %.1fs before retrying: %s",
-                        self.model_name, attempt, max_attempts, sleep_time, e,
+                        "LLM call retryable for %s (attempt %d/%d). Sleeping %.1fs: %s",
+                        self.model_name, attempt + 1, max_attempts, sleep_time, e,
                     )
                     time.sleep(sleep_time)
                 else:
@@ -262,6 +312,9 @@ class OpenAIClient(BaseLLMClient):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
 
+        # SDK-level retries: user's max_retries is saved by model_post_init
+        # as _user_max_retries and the SDK field is zeroed there. Here we
+        # just pass the user's value through (model_post_init handles the rest).
         llm_kwargs.setdefault("max_retries", 5)
 
         # Native OpenAI: use Responses API for consistent behavior across

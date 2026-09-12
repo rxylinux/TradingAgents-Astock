@@ -1,0 +1,23 @@
+{
+ "pair-001": {
+  "repeat_count": 2,
+  "arms": {
+   "baseline": {
+    "normalized_config": {
+     "model": "offline-stub",
+     "budget": 100,
+     "seed_policy": "recorded",
+     "evidence_debate_enabled": false
+    }
+   },
+   "candidate": {
+    "normalized_config": {
+     "model": "offline-stub",
+     "budget": 100,
+     "seed_policy": "recorded",
+     "evidence_debate_enabled": true
+    }
+   }
+  }
+ }
+}

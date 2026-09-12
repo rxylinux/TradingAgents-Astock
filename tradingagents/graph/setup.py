@@ -6,6 +6,8 @@ from langgraph.prebuilt import ToolNode
 
 from tradingagents.agents import *
 from tradingagents.agents.utils.agent_states import AgentState
+from tradingagents.evidence.cutoff import trusted_cutoff
+from tradingagents.evidence.ledger import collect_tool_message_delta
 
 from .conditional_logic import ConditionalLogic
 
@@ -59,6 +61,20 @@ def _branch_isolated_tool_node(role: str, tool_node):
     The ToolNode itself stays stock (no ``messages_key`` needed); the wrapper
     maps ``{role}_messages`` in/out, so tool requests and responses pair up
     per branch and per ``tool_call_id``.
+
+    C1: after mapping, the wrapper also collects THIS execution's
+    ``ToolMessage.artifact`` payloads (evidence-capable news tools emit them
+    via ``response_format="content_and_artifact"``) and publishes them as one
+    delta on the ``evidence_bundle`` channel. Run identity comes from state
+    (``run_metadata.run_id``) — never from the model — and the reducer merges
+    deltas immutably/idempotently, so parallel branches and checkpoint
+    replays cannot double-count or cross-contaminate.
+
+    Trusted cutoff (Codex C1 audit R1): the run's ``trade_date`` from state
+    is opened as a call-scoped trusted cutoff around this single ToolNode
+    invocation; evidence tools clamp model-requested end/curr dates to it
+    BEFORE the vendor fetch, so future articles can reach neither the
+    ToolMessage text nor the evidence index.
     """
 
     key = _branch_messages_key(role)
@@ -66,11 +82,22 @@ def _branch_isolated_tool_node(role: str, tool_node):
     def wrapped(state):
         branch_state = dict(state)
         branch_state["messages"] = state.get(key) or []
-        out = tool_node.invoke(branch_state)
+        with trusted_cutoff(state.get("trade_date")):
+            out = tool_node.invoke(branch_state)
         msgs = out.get("messages") if isinstance(out, dict) else None
-        if msgs is None:
-            return {}
-        return {key: msgs}
+
+        result = {}
+        if msgs is not None:
+            result[key] = msgs
+        delta = collect_tool_message_delta(
+            msgs or [],
+            role=role,
+            run_id=((state.get("run_metadata") or {}).get("run_id") or ""),
+            trade_date=(state.get("trade_date") or ""),
+        )
+        if delta is not None:
+            result["evidence_bundle"] = delta
+        return result
 
     return wrapped
 
@@ -86,6 +113,7 @@ class GraphSetup:
         conditional_logic: ConditionalLogic,
         resolve_llm=None,
         node_factories=None,
+        evidence_debate_enabled: bool = False,
     ):
         """Initialize with required components.
 
@@ -104,6 +132,21 @@ class GraphSetup:
         self.conditional_logic = conditional_logic
         self._resolve_llm = resolve_llm
         self._node_factories = node_factories or {}
+        self._evidence_debate_enabled = bool(evidence_debate_enabled)
+
+    def _evidence_recheck_tools(self, selected_analysts):
+        """E 补查工具 = 选中分析师已注册工具中名为 get_news/get_global_news
+        的真实对象（保持注册面不扩大；无可用工具 → 空列表，规划/补查保留
+        缺口）。"""
+        wanted = {"get_news", "get_global_news"}
+        found = {}
+        for role in selected_analysts:
+            node = self.tool_nodes.get(role)
+            by_name = getattr(node, "tools_by_name", None) or {}
+            for name, tool in by_name.items():
+                if name in wanted and name not in found:
+                    found[name] = tool
+        return [found[name] for name in ("get_news", "get_global_news") if name in found]
 
     def _node_factory(self, role: str, default_factory):
         """取某个角色的节点工厂：有注入用注入的，否则用原版。"""
@@ -254,7 +297,55 @@ class GraphSetup:
         ]
         workflow.add_edge(barrier_sources, "Quality Gate")
 
-        workflow.add_edge("Quality Gate", "Bull Researcher")
+        # E（Codex 实施契约 docs/E_CODEX_IMPLEMENTATION_CONTRACT_2026-09-09.md）：
+        # 默认关闭 → 拓扑与历史版本完全一致（Quality Gate 直连辩论）；开启才
+        # 注册互盲初判(并行)→分歧规划→两次单调用补查，之后进入**原**辩论
+        # 机制（轮数不增）。新增逻辑调用上限 3（初判×2+规划×1），工具调用
+        # 上限 2（每问题恰好 1 次，仅新闻 artifact 工具）。
+        if self._evidence_debate_enabled:
+            from tradingagents.agents.debate_evidence import (
+                create_disagreement_planner_node,
+                create_initial_view_node,
+                create_recheck_node,
+            )
+
+            workflow.add_node("Bull Initial View",
+                              create_initial_view_node("bull", self.llm_for("bull")))
+            workflow.add_node("Bear Initial View",
+                              create_initial_view_node("bear", self.llm_for("bear")))
+            # 工具白名单来自**当前选中分析师实际注册且支持 C1 artifact**
+            # 的新闻工具交集（E 契约规则 4/5；Codex E R1：不得因 E 扩大注
+            # 册面，也不能以全局常量可导入证明已启用）。
+            recheck_tools = self._evidence_recheck_tools(selected_analysts)
+            workflow.add_node("Disagreement Planner",
+                              create_disagreement_planner_node(
+                                  self.llm_for("research_manager"),
+                                  allowed_tools=[t.name for t in recheck_tools]))
+            workflow.add_node("Recheck Q1", create_recheck_node(0, recheck_tools))
+            workflow.add_node("Recheck Q2", create_recheck_node(1, recheck_tools))
+
+            def _slot_pending(state, slot):
+                ed = state.get("evidence_debate") or {}
+                return any(q.get("slot") == slot and q.get("status") == "pending"
+                           for q in ed.get("recheck_questions") or [])
+
+            def _route_q1(state):
+                return "Recheck Q1" if _slot_pending(state, 0) else "Bull Researcher"
+
+            def _route_q2(state):
+                return "Recheck Q2" if _slot_pending(state, 1) else "Bull Researcher"
+
+            workflow.add_edge("Quality Gate", "Bull Initial View")
+            workflow.add_edge("Quality Gate", "Bear Initial View")
+            workflow.add_edge(["Bull Initial View", "Bear Initial View"],
+                              "Disagreement Planner")
+            workflow.add_conditional_edges("Disagreement Planner", _route_q1,
+                                           ["Recheck Q1", "Bull Researcher"])
+            workflow.add_conditional_edges("Recheck Q1", _route_q2,
+                                           ["Recheck Q2", "Bull Researcher"])
+            workflow.add_edge("Recheck Q2", "Bull Researcher")
+        else:
+            workflow.add_edge("Quality Gate", "Bull Researcher")
 
         # Add remaining edges
         workflow.add_conditional_edges(

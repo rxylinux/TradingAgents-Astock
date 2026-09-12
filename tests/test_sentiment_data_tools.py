@@ -34,7 +34,12 @@ def test_analyst_binds_quantitative_tools():
 
 
 def test_graph_tool_node_matches_analyst_tools():
-    """图里注册的 social 工具必须与分析师绑定的一致，否则运行时才炸。"""
+    """图里注册的 social 工具必须与分析师绑定的一致，否则运行时才炸。
+
+    C1 之后图内新闻工具换成带证据 artifact 的同名等价包装（Python 标识符
+    带 `_with_evidence` 后缀，LangChain 工具名仍是 `get_news`，参数与文本
+    调用契约不变），比对时按运行时工具名归一化。
+    """
     import tradingagents.graph.trading_graph as tg
 
     src = inspect.getsource(tg.TradingAgentsGraph._create_tool_nodes)
@@ -45,6 +50,7 @@ def test_graph_tool_node_matches_analyst_tools():
         for t in social_block.group(1).split("\n")
         if t.strip().rstrip(",") and not t.strip().startswith("#")
     }
+    registered = {t.removesuffix("_with_evidence") for t in registered}
     assert registered == EXPECTED_TOOLS
 
 

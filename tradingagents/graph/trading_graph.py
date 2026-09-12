@@ -39,9 +39,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_balance_sheet,
     get_cashflow,
     get_income_statement,
-    get_news,
     get_insider_transactions,
-    get_global_news,
     get_profit_forecast,
     get_hot_stocks,
     get_northbound_flow,
@@ -50,6 +48,30 @@ from tradingagents.agents.utils.agent_utils import (
     get_dragon_tiger_board,
     get_lockup_expiry,
     get_industry_comparison,
+)
+
+# C1: 图内新闻工具使用带证据 artifact 的等价包装（工具名/参数/文本调用
+# 契约与 news_data_tools 完全一致；ToolNode 会把结构化抓取结果放进
+# ToolMessage.artifact，由分支隔离工具节点收集进 evidence_bundle）。
+from tradingagents.evidence.graph_tools import (
+    get_news as get_news_with_evidence,
+    get_global_news as get_global_news_with_evidence,
+)
+from tradingagents.evidence.ledger import canonicalize_bundle, empty_bundle
+from tradingagents.agents.debate_evidence import SCHEMA_VERSION as E_SCHEMA_VERSION
+from tradingagents.evaluation.review_record import MAX_FILE_BYTES
+from tradingagents.evaluation.review_projection import (
+    RecordValidationError as ProjectionValidationError,
+    build_review_projection,
+    validate_projection_payload,
+)
+from tradingagents.dataflows.financial_panel import (
+    MAX_MANIFEST_BYTES,
+    MAX_MANIFEST_ITEMS,
+    ManifestError as PanelManifestError,
+    bind_run as bind_panel_run,
+    compute_financial_panel,
+    verify_run_binding,
 )
 
 from .checkpointer import checkpoint_step, clear_checkpoint, get_checkpointer, thread_id
@@ -318,6 +340,7 @@ class TradingAgentsGraph:
             self.tool_nodes,
             self.conditional_logic,
             resolve_llm=self.role_llms.get,
+            evidence_debate_enabled=bool(self.config.get("evidence_debate_enabled")),
         )
 
         self.propagator = Propagator()
@@ -438,6 +461,16 @@ class TradingAgentsGraph:
         if max_tokens:
             kwargs["max_tokens"] = max_tokens
 
+        # B1: provider timeout / retry 透传。max_retries=N → SDK 总共 1+N 次
+        # HTTP 请求；timeout 是每次请求的超时秒数。显式 0 是合法值（仅 1 次
+        # 请求），不能用 falsy 检查跳过。
+        max_retries = self.config.get("max_retries")
+        if max_retries is not None:
+            kwargs["max_retries"] = max_retries
+        timeout = self.config.get("timeout")
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+
         if provider == "google":
             thinking_level = self.config.get("google_thinking_level")
             if thinking_level:
@@ -456,7 +489,12 @@ class TradingAgentsGraph:
         return kwargs
 
     def _create_tool_nodes(self) -> Dict[str, ToolNode]:
-        """Create tool nodes for different data sources using abstract methods."""
+        """Create tool nodes for different data sources using abstract methods.
+
+        新闻工具统一使用 evidence 包装版（同名同参数）：social/policy/
+        hot_money/lockup 等没有 news 分支的角色同样调用新闻工具，采集
+        不局限于 news 分支（Codex C1 契约）。
+        """
         return {
             "market": ToolNode(
                 [
@@ -470,7 +508,7 @@ class TradingAgentsGraph:
                 [
                     # 情绪分析不只读新闻：资金流是最硬的情绪证据，量价给强度，
                     # 强势股榜给热度归因，新闻负责解释成因（#61）。
-                    get_news,
+                    get_news_with_evidence,
                     get_fund_flow,
                     get_hot_stocks,
                     get_stock_data,
@@ -479,8 +517,8 @@ class TradingAgentsGraph:
             "news": ToolNode(
                 [
                     # News and insider information
-                    get_news,
-                    get_global_news,
+                    get_news_with_evidence,
+                    get_global_news_with_evidence,
                     get_insider_transactions,
                 ]
             ),
@@ -496,14 +534,14 @@ class TradingAgentsGraph:
             ),
             "policy": ToolNode(
                 [
-                    get_news,
-                    get_global_news,
+                    get_news_with_evidence,
+                    get_global_news_with_evidence,
                 ]
             ),
             "hot_money": ToolNode(
                 [
                     get_stock_data,
-                    get_news,
+                    get_news_with_evidence,
                     get_insider_transactions,
                     get_hot_stocks,
                     get_northbound_flow,
@@ -516,7 +554,7 @@ class TradingAgentsGraph:
             "lockup": ToolNode(
                 [
                     get_insider_transactions,
-                    get_news,
+                    get_news_with_evidence,
                     get_fundamentals,
                     get_lockup_expiry,
                 ]
@@ -832,7 +870,126 @@ class TradingAgentsGraph:
             instrument_type=self.config.get("instrument_type"),
             selected_analysts=getattr(self, "selected_analysts", None),
         )
+        # C1: fresh 运行预置空证据账本（归属本 run）。通道首轮写入不经
+        # reducer 直存（BinaryOperatorAggregate 语义），预置 bundle 形态
+        # 可保证最终 state/落盘 JSON 的 schema 稳定；恢复路径随 checkpoint。
+        init_agent_state["evidence_bundle"] = empty_bundle(
+            init_agent_state["run_metadata"].get("run_id", "")
+        )
+        # D2: 显式 manifest → 在图执行与任何模型调用之前读取/验证/计算/
+        # 注入；失效 fail-fast。默认（未配置）个股与指数一律无卡——不为
+        # 指数伪造 dummy 财务输入；指数的 not_applicable 卡只来自显式
+        # manifest 经 D1 校验。绑定本 run 身份（新 fresh 必然新 run_id；
+        # 数值仍是 manifest+可信上下文的确定性函数）。
+        # E（Codex E R3）：fresh 即持久化 E 模式/版本锚点——恢复的**每一个**
+        # 阶段都与锚点比较；无锚旧态 + E-on = 无法证明阶段兼容 → 拒绝（不
+        # 重跑已完成节点来伪装恢复成功）。
+        init_agent_state["run_metadata"]["evidence_debate"] = {
+            "enabled": bool(self.config.get("evidence_debate_enabled")),
+            "schema_version": E_SCHEMA_VERSION,
+        }
+        # F2（Codex 契约 #1/#3/#4 + R1）：**两种模式都持久化模式锚**（enabled
+        # False/True），恢复按锚比对当前配置——双向切换拒绝；显式
+        # review_records_path 在模型调用前读取/校验/投影/锚定；坏输入 fail-fast。
+        f2_enabled = bool(self.config.get("review_records_path"))
+        init_agent_state["run_metadata"]["review_projection"] = {
+            "enabled": f2_enabled,
+            "schema_version": 1,
+            "input_digest": None,
+            "payload_digest": None,
+            "ticker": str(company_name),
+            "instrument_type": str(self.config.get("instrument_type") or "stock"),
+            "as_of": str(trade_date),
+        }
+        if f2_enabled:
+            projection_payload = self._prepare_review_projection(
+                company_name, str(trade_date),
+                run_id=init_agent_state["run_metadata"].get("run_id", ""))
+            init_agent_state["review_projection"] = projection_payload
+            init_agent_state["run_metadata"]["review_projection"].update({
+                "input_digest": projection_payload["input_digest"],
+                "payload_digest": projection_payload["payload_digest"],
+            })
+        panel_card = self._prepare_financial_panel(
+            company_name, str(trade_date),
+            run_id=init_agent_state["run_metadata"].get("run_id", ""),
+        )
+        if panel_card is not None:
+            init_agent_state["financial_panel"] = panel_card
+            init_agent_state["run_metadata"]["financial_panel"] = {
+                "manifest_digest": panel_card.get("manifest_digest", ""),
+                "overall_status": panel_card.get("overall_status", ""),
+            }
         return init_agent_state, args, resume_step
+
+    def _prepare_review_projection(self, company_name: str, trade_date: str,
+                                    run_id: str = ""):
+        """F2 fresh 投影：读显式文件 → 全量校验 → 过滤 → 检索 → payload。
+
+        缺省（未配置）返回 None；任何非法输入在准备期抛
+        RecordValidationError（零模型调用）。恢复路径绝不调用本方法。
+        """
+        records_path = self.config.get("review_records_path")
+        if not records_path:
+            return None
+        try:
+            with open(records_path, "rb") as fh:
+                raw = fh.read(MAX_FILE_BYTES + 1)
+        except OSError as exc:
+            raise ProjectionValidationError(
+                f"review_records_path 读取失败（{exc}）；运行未启动") from exc
+        if len(raw) > MAX_FILE_BYTES:
+            raise ProjectionValidationError(
+                f"review_records 文件超过 {MAX_FILE_BYTES} 字节上限；运行未启动")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ProjectionValidationError(
+                f"review_records 文件不是 UTF-8（{exc}）；运行未启动") from exc
+        return build_review_projection(
+            text,
+            ticker=str(company_name),
+            instrument_type=str(self.config.get("instrument_type") or "stock"),
+            as_of=trade_date,
+            run_id=run_id)
+
+    def _prepare_financial_panel(self, company_name: str, trade_date: str, run_id: str = ""):
+        """D2 fresh 注入：读取显式 manifest → D1 纯计算 → 绑定本 run。
+
+        任何失败在准备期抛出（在任何模型调用之前终止运行）；元数据只存
+        可复验摘要（digest+status），机器路径不进 state 元数据、不进提示词。
+        返回 None = 无卡（未配置 manifest，个股/指数一致）。
+        """
+        manifest_path = self.config.get("financial_panel_manifest")
+        if not manifest_path:
+            return None
+        try:
+            with open(manifest_path, "rb") as fh:
+                raw = fh.read(MAX_MANIFEST_BYTES + 1)
+        except OSError as exc:
+            raise PanelManifestError(
+                f"financial_panel_manifest 读取失败（{exc}）；运行未启动，未产生任何模型调用") from exc
+        if len(raw) > MAX_MANIFEST_BYTES:
+            raise PanelManifestError(
+                f"financial_panel_manifest 超过 {MAX_MANIFEST_BYTES} 字节上限；运行未启动")
+        try:
+            manifest = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PanelManifestError(
+                f"financial_panel_manifest 不是合法 UTF-8 JSON（{exc}）；运行未启动") from exc
+        if not isinstance(manifest, dict):
+            raise PanelManifestError("financial_panel_manifest 必须是 JSON 对象；运行未启动")
+        if isinstance(manifest.get("inputs"), list) and len(manifest["inputs"]) > MAX_MANIFEST_ITEMS:
+            raise PanelManifestError(
+                f"financial_panel_manifest 输入条目 {len(manifest['inputs'])} 超过 "
+                f"{MAX_MANIFEST_ITEMS} 上限；运行未启动")
+        card = compute_financial_panel(
+            manifest,
+            instrument=str(company_name),
+            instrument_type=str(self.config.get("instrument_type") or "stock"),
+            analysis_date=trade_date,
+        )
+        return bind_panel_run(card, run_id)
 
     @staticmethod
     def _shared_channel_has_ai_traffic(values: dict) -> bool:
@@ -950,6 +1107,17 @@ class TradingAgentsGraph:
         values = snap.values or {}
         self._refuse_team_mismatch_checkpoint(snap, company_name, trade_date)
 
+        # D2: 面板恢复校验——只读 checkpoint 原卡（绝不打开当前 manifest）。
+        # 键缺失 = 合法旧态；键存在但归属失配/损坏 = 拒绝恢复（保留断点，
+        # 不清空不覆盖，不把损坏伪装成未记录）——在任何模型调用之前。
+        self._validate_resumed_panel(values, company_name, trade_date)
+        # E: 拓扑失配拒绝——断点含 E 字段而当前关闭（或反之且辩论已开始）
+        # 都不能错配恢复，以免用错误拓扑续跑（E 契约规则 8）。
+        self._validate_resumed_evidence_debate(values, pending=snap.next)
+        # F2（契约 #4/#5）：恢复只读持久投影——绝不重读文件；锚点/归属/
+        # 摘要/嵌套全验证；失配拒绝且断点保留。
+        self._validate_resumed_review_projection(values, company_name, trade_date)
+
         stale_ctx = values.get("past_context")
         fresh_ctx = self._past_context_as_of(company_name, trade_date)
         if stale_ctx == fresh_ctx:
@@ -980,6 +1148,183 @@ class TradingAgentsGraph:
             "Refreshed past_context on resumed checkpoint (time-bound filter) "
             "for %s %s", company_name, trade_date,
         )
+
+    def _validate_resumed_panel(self, values, company_name: str, trade_date: str) -> None:
+        """D2 恢复面板归属校验（纯读 checkpoint；不触碰 manifest 文件）。"""
+        card = values.get("financial_panel") if isinstance(values, dict) else None
+        if card is None:
+            return  # 合法旧态（无卡断点）：即使当前配置了 manifest 也不补卡
+        meta = values.get("run_metadata") or {}
+        fp_meta = meta.get("financial_panel") if isinstance(meta.get("financial_panel"), dict) else {}
+        problems = verify_run_binding(
+            card,
+            run_id=str(meta.get("run_id") or ""),
+            instrument=str(company_name),
+            instrument_type=str(self.config.get("instrument_type") or "stock"),
+            analysis_date=str(trade_date),
+            metadata_digest=(fp_meta or {}).get("manifest_digest"),
+        )
+        if problems:
+            raise RuntimeError(
+                f"无法安全恢复 {company_name} {trade_date} 的断点：财务面板归属"
+                f"校验失败（{'；'.join(problems)}）。断点已保留（未清空未覆盖）；"
+                f"该卡不作为未记录处理——请核查 manifest 与运行参数后重新开始分析。"
+            )
+
+    def _validate_resumed_evidence_debate(self, values, pending=None) -> None:
+        """E 恢复完整性：模式/版本锚点、结构形状、run 归属（失配即拒绝）。
+
+        Codex E R3 契约：
+
+        - **锚点**：fresh 准备即把 `run_metadata.evidence_debate =
+          {enabled, schema_version}` 写入 state——恢复的每个阶段都与当前配
+          置比较；**双向切换都拒绝**（E-off 断点 + E-on 会静默跳过全部 E
+          节点；E-on 断点 + E-off 会截断 E 产物）。无锚旧态（E 之前的断
+          点）+ 当前 E-on = 无法证明阶段兼容 → 拒绝；同模式（off↔off）兼
+          容保留。绝不重跑已完成节点来伪装恢复成功。
+        - **形状**：E 字段存在但不是 dict（list/str 等）= 损坏 → 拒绝；
+          缺失/None = 合法旧态，二者必须区分。
+        - **版本**：E 字段 schema_version 必须等于当前实现版本（999 等
+          未知版本拒绝，不忽略版本继续使用）。
+        - **归属**：evidence_debate 与两个初判都锚定本 run；可信
+          run_metadata.run_id **缺失时同样拒绝**（有 E 状态但不能证明归
+          属）。所有失败发生在任何模型/工具调用之前，断点原样保留。
+        """
+        problems = []
+        # —— 形状：存在但坏类型 = 损坏（缺失/None 稍后按旧态处理）——
+        for field in ("evidence_debate", "initial_view_bull", "initial_view_bear"):
+            value = values.get(field)
+            if value is not None and not isinstance(value, dict):
+                problems.append(f"{field} 结构损坏（{type(value).__name__}，预期对象）")
+        has_e = any(isinstance(values.get(k), dict)
+                    for k in ("evidence_debate", "initial_view_bull", "initial_view_bear"))
+        corrupt = bool(problems)
+        enabled = bool(self.config.get("evidence_debate_enabled"))
+        meta = values.get("run_metadata") if isinstance(values.get("run_metadata"), dict) else {}
+        anchor = (meta.get("evidence_debate")
+                  if isinstance(meta.get("evidence_debate"), dict) else None)
+
+        # —— 模式/版本锚点（双向）——
+        if anchor is not None:
+            anchor_enabled = bool(anchor.get("enabled"))
+            if anchor_enabled != enabled:
+                problems.append(
+                    f"E 模式锚点不符（断点 enabled={anchor_enabled} vs 当前 {enabled}）——"
+                    "切换拓扑会跳过或截断 E 阶段；请用与断点一致的开关状态恢复或重开")
+            anchor_version = anchor.get("schema_version")
+            if has_e or enabled:
+                if not isinstance(anchor_version, int) or anchor_version != E_SCHEMA_VERSION:
+                    problems.append(
+                        f"E 版本锚点未知（{anchor_version!r} vs 实现 {E_SCHEMA_VERSION}）")
+        elif enabled:
+            # 无锚旧态 + 当前 E-on：无法证明待执行阶段与新拓扑兼容。
+            problems.append(
+                "断点缺少 E 模式锚点（早于 E 的旧断点）而当前已开启 "
+                "evidence_debate_enabled——无法证明恢复不会跳过 E 阶段；请关闭 E "
+                "开关恢复或重开分析")
+        elif has_e:
+            problems.append("断点包含 E 字段但当前已关闭 evidence_debate_enabled（拓扑不一致）")
+
+        # —— E 字段版本与归属 ——
+        meta_run_id = str(meta.get("run_id") or "")
+        if has_e and not meta_run_id:
+            problems.append("缺少可信 run_id（run_metadata.run_id）——E 状态无法证明归属")
+        ed = values.get("evidence_debate") if isinstance(values.get("evidence_debate"), dict) else None
+        if ed is not None:
+            if ed.get("schema_version") != E_SCHEMA_VERSION:
+                problems.append(f"evidence_debate schema_version 未知（{ed.get('schema_version')!r}）")
+            ed_run = str(ed.get("run_id") or "")
+            if not ed_run:
+                problems.append("evidence_debate 缺少 run_id 绑定（不能自证归属）")
+            elif meta_run_id and ed_run != meta_run_id:
+                problems.append(f"evidence_debate 属于异 run（{ed_run!r} vs {meta_run_id!r}）")
+        for field in ("initial_view_bull", "initial_view_bear"):
+            view = values.get(field) if isinstance(values.get(field), dict) else None
+            if view is None:
+                continue
+            if view.get("schema_version") != E_SCHEMA_VERSION:
+                problems.append(f"{field} schema_version 未知（{view.get('schema_version')!r}）")
+            view_run = str(view.get("run_id") or "")
+            if not view_run:
+                problems.append(f"{field} 缺少 run_id 绑定（不能自证归属）")
+            elif meta_run_id and view_run != meta_run_id:
+                problems.append(f"{field} 属于异 run（{view_run!r} vs {meta_run_id!r}）")
+
+        if problems:
+            raise RuntimeError(
+                "无法安全恢复断点：E 状态校验失败（" + "；".join(problems) +
+                "）。断点已保留（未清空未覆盖，不清零不伪装缺失）；请核查 E 开关/"
+                "版本/运行身份后重新开始分析。"
+            )
+
+    def _validate_resumed_review_projection(self, values, company_name, trade_date) -> None:
+        """F2 恢复校验（纯读；不触碰 review_records_path；Codex F2 R1 #4）。
+
+        顺序固定：先持久**模式/schema 锚**与当前模式比对（双向切换拒绝），
+        再处理 payload 有无——有锚无 payload 不是旧态（拒绝），真正旧断点
+        （无锚）在**关闭模式**兼容；所有锚声明字段比对，不只挑摘要。
+        """
+        meta = values.get("run_metadata") if isinstance(values, dict) else None
+        if not isinstance(meta, dict):
+            meta = {}
+        anchor = meta.get("review_projection")
+        current_enabled = bool(self.config.get("review_records_path"))
+        trusted_type = str(self.config.get("instrument_type") or "stock")
+
+        if anchor is None:
+            # 真正旧断点（F2 之前）：关闭模式兼容；开启模式无法证明阶段兼容。
+            if current_enabled:
+                raise RuntimeError(
+                    "无法安全恢复断点：断点缺少 F2 模式锚点（早于 F2 的旧断点）"
+                    "而当前已配置 review_records_path——无法证明恢复不会补造历史"
+                    "投影。断点已保留；请移除该配置恢复或重开分析。"
+                )
+            if values.get("review_projection") is not None:
+                raise RuntimeError(
+                    "无法安全恢复断点：state 含投影但缺少模式锚点（不能自证归属）。"
+                    "断点已保留；请核查后重新开始分析。"
+                )
+            return
+        if not isinstance(anchor, dict):
+            raise RuntimeError(
+                "无法安全恢复断点：F2 模式锚点损坏（非对象）。断点已保留。")
+
+        problems: list = []
+        a_enabled = anchor.get("enabled")
+        if not isinstance(a_enabled, bool):
+            problems.append(f"锚点 enabled 非布尔（{a_enabled!r}）")
+        elif a_enabled != current_enabled:
+            problems.append(
+                f"F2 模式不符（断点 enabled={a_enabled} vs 当前 {current_enabled}）"
+                "——双向切换拒绝；请用与断点一致的配置恢复或重开分析")
+        a_schema = anchor.get("schema_version")
+        if isinstance(a_schema, bool) or a_schema != 1:
+            problems.append(f"锚点 schema_version 非法（{a_schema!r}）")
+        for field, trusted in (("ticker", str(company_name)),
+                               ("instrument_type", trusted_type),
+                               ("as_of", str(trade_date))):
+            if str(anchor.get(field)) != trusted:
+                problems.append(f"锚点 {field} 不符（{anchor.get(field)!r} vs {trusted!r}）")
+
+        payload = values.get("review_projection")
+        if a_enabled is True and payload is None:
+            problems.append("锚点声明 enabled 但 state 缺少投影（有锚无 payload 不是旧态）")
+        if not str(meta.get("run_id") or "").strip():
+            problems.append("缺少可信 run_metadata.run_id（缺失可信身份即拒绝）")
+        if payload is not None:
+            problems += validate_projection_payload(
+                payload,
+                run_id=str(meta.get("run_id") or ""),
+                ticker=str(company_name),
+                instrument_type=trusted_type,
+                as_of=str(trade_date),
+                anchor=anchor)
+        if problems:
+            raise RuntimeError(
+                "无法安全恢复断点：F2 历史经验投影校验失败（"
+                + "；".join(problems) + "）。断点已保留（不清空不伪装缺失）；"
+                "请核查 review_records_path 与运行参数后重新开始分析。"
+            )
 
     def _past_context_as_of(self, company_name: str, trade_date: str) -> str:
         """Memory context limited to what was knowable at the analysis time.
@@ -1101,6 +1446,24 @@ class TradingAgentsGraph:
             },
             "investment_plan": final_state.get("investment_plan", ""),
             "final_trade_decision": final_state.get("final_trade_decision", ""),
+            # C1: 证据账本随统一 JSON 保存（各来源抓取状态/过滤后证据记录/
+            # 排除计数）。旧断点/旧流程无此键 → null = 未记录来源证据，
+            # 加载端不得凭空生成。canonicalize 兜底单分支首轮直存的
+            # delta 形态，保证落盘 schema 稳定。
+            "evidence_bundle": canonicalize_bundle(final_state.get("evidence_bundle")),
+            # F2: 历史经验投影 payload 随统一 JSON 保存（未启用 → null=未记录）。
+            "review_projection": final_state.get("review_projection"),
+            # E: 独立初判与分歧核查随统一 JSON 保存（默认关闭的旧运行无键 →
+            # null = 未记录；usage 只记已知量，unknown 不写 0）。
+            "initial_view_bull": final_state.get("initial_view_bull"),
+            "initial_view_bear": final_state.get("initial_view_bear"),
+            "evidence_debate": final_state.get("evidence_debate"),
+            # C2: 研究假设卡随统一 JSON 保存（旧断点/旧流程无此键 → null =
+            # 未记录，展示端显示未记录，不凭空生成）。
+            "thesis_card": final_state.get("thesis_card"),
+            # D1: 可复算财务面板随统一 JSON 保存（图内默认无人写入 → null =
+            # 未记录；注入方为离线 CLI/调用方，D2 再接运行准备路径）。
+            "financial_panel": final_state.get("financial_panel"),
             # N02: 运行档案随报告保存（旧断点/旧流程无档案 → null = 未记录，
             # 加载端不得把恢复时的当前配置伪装成原配置）。
             "run_metadata": final_state.get("run_metadata"),

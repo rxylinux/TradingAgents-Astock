@@ -1,24 +1,15 @@
-"""Shared helpers for invoking an agent with structured output and a graceful fallback.
+"""Structured output helpers with invocation-local shared retry budget.
 
-The Portfolio Manager, Trader, and Research Manager all follow the same
-canonical pattern:
-
-1. At agent creation, wrap the LLM with ``with_structured_output(Schema)``
-   so the model returns a typed Pydantic instance. If the provider does
-   not support structured output (rare; mostly older Ollama models), the
-   wrap is skipped and the agent uses free-text generation instead.
-2. At invocation, run the structured call and render the result back to
-   markdown. If the structured call itself fails for any reason
-   (malformed JSON from a weak model, transient provider issue), fall
-   back to a plain ``llm.invoke`` so the pipeline never blocks.
-
-Centralising the pattern here keeps the agent factories small and ensures
-all three agents log the same warnings when fallback fires.
+The structured call and free-text fallback consume from a single budget
+(1 + user max_retries total HTTP requests) via a ContextVar. When the
+budget is active, NormalizedChatOpenAI.invoke() makes exactly 1 HTTP
+request without internal retry — this helper manages all retries.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Callable, Optional, TypeVar
 
 from pydantic import BaseModel
@@ -27,13 +18,44 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
+_NON_RETRYABLE_TYPES: tuple = ()
+_RETRYABLE_TYPES: tuple = ()
+try:
+    from openai import (
+        APIConnectionError,
+        APITimeoutError,
+        AuthenticationError,
+        BadRequestError,
+        InternalServerError,
+        PermissionDeniedError,
+        RateLimitError,
+    )
+    _NON_RETRYABLE_TYPES = (AuthenticationError, PermissionDeniedError, BadRequestError)
+    _RETRYABLE_TYPES = (RateLimitError, InternalServerError, APIConnectionError, APITimeoutError)
+except ImportError:
+    pass
+
+
+def _get_retry_budget(llm: Any) -> int:
+    """Total HTTP attempts (1 + user max_retries).
+
+    Validates the return value is a positive non-bool int; falls back to
+    default for clients/seams that don't implement the budget capability
+    correctly (legacy mocks, older client versions). Real invalid config
+    is rejected by NormalizedChatOpenAI at construction, not here.
+    """
+    if hasattr(llm, "_get_retry_budget"):
+        try:
+            budget = llm._get_retry_budget()
+            if isinstance(budget, int) and not isinstance(budget, bool) and budget >= 1:
+                return budget
+        except Exception:
+            pass
+    return 3  # Default: 1 + 2 retries (matches NormalizedChatOpenAI default)
+
 
 def bind_structured(llm: Any, schema: type[T], agent_name: str) -> Optional[Any]:
-    """Return ``llm.with_structured_output(schema)`` or ``None`` if unsupported.
-
-    Logs a warning when the binding fails so the user understands the agent
-    will use free-text generation for every call instead of one-shot fallback.
-    """
+    """Return ``llm.with_structured_output(schema)`` or ``None`` if unsupported."""
     try:
         return llm.with_structured_output(schema)
     except (NotImplementedError, AttributeError) as exc:
@@ -52,22 +74,75 @@ def invoke_structured_or_freetext(
     render: Callable[[T], str],
     agent_name: str,
 ) -> str:
-    """Run the structured call and render to markdown; fall back to free-text on any failure.
+    """Run structured call, fall back to free-text with shared retry budget.
 
-    ``prompt`` is whatever the underlying LLM accepts (a string for chat
-    invocations, a list of message dicts for chat models that take that
-    shape). The same value is forwarded to the free-text path so the
-    fallback sees the same input the structured call did.
+    Budget: total = 1 + user's max_retries HTTP requests across BOTH paths.
+    Uses a ContextVar to disable invoke()'s internal retry — this helper
+    is the sole retry authority. Each invoke() makes exactly 1 request.
     """
-    if structured_llm is not None:
-        try:
-            result = structured_llm.invoke(prompt)
-            return render(result)
-        except Exception as exc:
-            logger.warning(
-                "%s: structured-output invocation failed (%s); retrying once as free text",
-                agent_name, exc,
-            )
+    from tradingagents.llm_clients.openai_client import _shared_budget
 
-    response = plain_llm.invoke(prompt)
-    return response.content
+    # Plain-only: no shared budget — invoke() handles its own retries
+    if structured_llm is None:
+        response = plain_llm.invoke(prompt)
+        return response.content
+
+    total_budget = _get_retry_budget(plain_llm)
+    remaining = total_budget
+    last_parse_exc: Optional[Exception] = None
+
+    # Activate shared budget — invoke() will make 1 request per call
+    token = _shared_budget.set(total_budget)
+    try:
+        # Structured retries (each attempt = 1 HTTP request)
+        for attempt in range(total_budget):
+            remaining = total_budget - attempt - 1
+            _shared_budget.set(remaining + 1)  # Budget BEFORE this attempt
+            try:
+                result = structured_llm.invoke(prompt)
+                return render(result)
+            except _NON_RETRYABLE_TYPES:
+                logger.warning(
+                    "%s: structured-output auth/param error; no fallback", agent_name)
+                raise
+            except Exception as exc:
+                if isinstance(exc, _RETRYABLE_TYPES):
+                    if remaining > 0:
+                        # Bounded exponential backoff (same policy as invoke())
+                        time.sleep(min(2 ** attempt, 8) + 0.1)
+                        continue
+                    logger.warning(
+                        "%s: retry budget exhausted (%d); no fallback",
+                        agent_name, total_budget)
+                    raise
+                else:
+                    # Parse/format failure — try fallback if budget remains
+                    last_parse_exc = exc
+                    logger.warning(
+                        "%s: structured parse failure; %d remaining for fallback",
+                        agent_name, remaining)
+                    break
+
+        # Fallback with remaining budget (each attempt = 1 HTTP request)
+        if remaining <= 0:
+            if last_parse_exc is not None:
+                raise last_parse_exc
+            raise RuntimeError(f"{agent_name}: retry budget exhausted")
+
+        for attempt in range(remaining):
+            _shared_budget.set(remaining - attempt)
+            try:
+                response = plain_llm.invoke(prompt)
+                return response.content
+            except _NON_RETRYABLE_TYPES:
+                raise
+            except Exception as exc:
+                if isinstance(exc, _RETRYABLE_TYPES) and attempt < remaining - 1:
+                    # Bounded exponential backoff (same policy as invoke())
+                    time.sleep(min(2 ** attempt, 8) + 0.1)
+                    continue
+                raise
+
+        raise RuntimeError(f"{agent_name}: retry budget exhausted")
+    finally:
+        _shared_budget.reset(token)

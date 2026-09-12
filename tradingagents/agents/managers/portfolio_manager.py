@@ -19,6 +19,10 @@ from tradingagents.agents.report_quality import (
     append_limitation_notice,
     quality_context_for_prompt,
 )
+from tradingagents.agents.thesis import append_thesis_status, build_thesis_card
+from tradingagents.evidence.prompt_context import evidence_context_for_prompt
+from tradingagents.dataflows.financial_panel import panel_context_for_prompt
+from tradingagents.evaluation.review_projection import projection_for_prompt
 from tradingagents.agents.utils.structured import (
     bind_structured,
     invoke_structured_or_freetext,
@@ -46,6 +50,12 @@ def create_portfolio_manager(llm):
 
         # N01: 组合经理直接获得质量限制（不依赖辩论转述）
         quality_block = quality_context_for_prompt(state)
+        # C1: 证据索引（旧 state 无证据账本时空段）
+        evidence_block = evidence_context_for_prompt(state)
+        # D2: 财务面板投影（仅 ok 数值+实际依赖；未配置时空段）
+        panel_block = panel_context_for_prompt(state)
+        # F2: 历史经验只读投影（未启用/无效 → 空/受控说明）
+        review_block = projection_for_prompt(state)
 
         past_context = state.get("past_context", "")
         lessons_line = (
@@ -59,6 +69,9 @@ def create_portfolio_manager(llm):
 {instrument_context}
 
 {quality_block}
+{evidence_block}
+{panel_block}
+{review_block}
 ---
 
 **A-Stock Trading Constraints** (must factor into your decision):
@@ -99,11 +112,19 @@ def create_portfolio_manager(llm):
 
 Be decisive and ground every conclusion in specific evidence from the analysts.{_NO_LEVELS_RULE}{get_language_instruction()}"""
 
+        # C2: 捕获结构化决策对象（render 包装仅旁路保存，不改变渲染输出），
+        # 确定性构建研究假设卡；自由文本回退时 captured 为空 → unknown 卡。
+        captured_decision = []
+
+        def _render_with_capture(decision):
+            captured_decision.append(decision)
+            return render_pm_decision(decision)
+
         final_trade_decision = invoke_structured_or_freetext(
             structured_llm,
             llm,
             prompt,
-            render_pm_decision,
+            _render_with_capture,
             "Portfolio Manager",
         )
         # N01: 确定性质量提示——即便模型不遵循提示词，受限研判标记也不消失；
@@ -111,6 +132,11 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
         final_trade_decision = append_limitation_notice(
             final_trade_decision, state.get("data_quality")
         )
+        # C2: 假设卡（确定性：评估状态/引用校验/uncalibrated 全部由代码生成）
+        thesis_card = build_thesis_card(
+            captured_decision[0] if captured_decision else None, state
+        )
+        final_trade_decision = append_thesis_status(final_trade_decision, thesis_card)
 
         new_risk_debate_state = {
             "judge_decision": final_trade_decision,
@@ -128,6 +154,8 @@ Be decisive and ground every conclusion in specific evidence from the analysts.{
         return {
             "risk_debate_state": new_risk_debate_state,
             "final_trade_decision": final_trade_decision,
+            # C2: 研究假设卡随 state 流转（下游只读；受限评估不被改写冲掉）
+            "thesis_card": thesis_card,
         }
 
     return portfolio_manager_node

@@ -35,6 +35,15 @@ import requests as _requests
 
 from .utils import safe_ticker_component
 from .cache_utils import DataFailure, cached_data, robust_api_call
+from tradingagents.evidence.ledger import (
+    AVAIL_PUBLICATION_ONLY,
+    PRECISION_DATETIME,
+    SCHEMA_ARTIFACT,
+    STATUS_EMPTY,
+    STATUS_FAILED,
+    STATUS_PARTIAL,
+    STATUS_SUCCESSFUL,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1561,24 +1570,77 @@ def _fetch_news_sina(code: str, page_size: int = 20) -> list[dict]:
     return articles
 
 
-def get_news(
-    ticker: Annotated[str, "A-stock code"],
-    start_date: Annotated[str, "Start date yyyy-mm-dd"],
-    end_date: Annotated[str, "End date yyyy-mm-dd"],
-) -> str:
-    """Get stock-specific news via East Money direct API (Sina as fallback)."""
+_SHANGHAY_TZ = timezone(timedelta(hours=8))
+
+
+def _parse_news_time(raw: str) -> "datetime | None":
+    """Strictly parse a news timestamp to a Shanghai-date datetime.
+
+    Uses ``datetime.fromisoformat`` for strict ISO 8601 validation:
+    rejects garbage suffixes, invalid hours/minutes, and trailing characters.
+    Handles ``Z`` suffix (normalized to ``+00:00``) and ``±HH:MM`` offsets,
+    converting everything to Asia/Shanghai (UTC+8) for consistent day
+    boundary comparison.
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+
+    # Date-only: "YYYY-MM-DD" (no time component)
+    if len(raw) == 10:
+        try:
+            d = datetime.strptime(raw, "%Y-%m-%d")
+            return d.replace(tzinfo=_SHANGHAY_TZ)
+        except ValueError:
+            return None
+
+    # Normalize Z suffix → +00:00 (Python < 3.11 compatibility)
+    iso = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+
+    # Strict ISO 8601 parsing — rejects trailing garbage, invalid hours, etc.
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+
+    # Assume no-timezone timestamps are Shanghai local time
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_SHANGHAY_TZ)
+    else:
+        dt = dt.astimezone(_SHANGHAY_TZ)
+    return dt
+
+
+def _get_news_with_payload(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+) -> tuple[str, dict]:
+    """Single stock-news fetch producing (text, evidence artifact).
+
+    The public :func:`get_news` discards the artifact; the evidence-capable
+    route (:func:`get_news_with_evidence`) returns both from the SAME fetch
+    — the artifact carries only records that survived the time-window
+    filter (never raw/future records), full-ISO publish times with
+    timezone, per-source statuses, and split exclusion counts.
+    """
     code = _normalize_ticker(ticker)
 
-    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=_SHANGHAY_TZ)
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=_SHANGHAY_TZ) + timedelta(days=1, microseconds=-1)
 
     articles: list[dict] = []
     source_label = ""
+    em_failed = False
+    sina_failed = False
 
     try:
         articles = _fetch_news_eastmoney(code)
         source_label = "东方财富"
     except Exception as e:
+        em_failed = True
         logger.warning("East Money news fetch failed for %s: %s", code, e)
 
     if not articles:
@@ -1586,28 +1648,143 @@ def get_news(
             articles = _fetch_news_sina(code)
             source_label = "新浪财经"
         except Exception as e:
+            sina_failed = True
             logger.warning("Sina news fetch failed for %s: %s", code, e)
 
+    def _em_status(producing: bool, filtered_count: int, fetched_count: int) -> dict:
+        if em_failed:
+            return {"source": "东方财富", "status": STATUS_FAILED, "record_count": 0, "detail": "网络/服务故障"}
+        if producing:
+            return {
+                "source": "东方财富", "status": STATUS_SUCCESSFUL if filtered_count else STATUS_EMPTY,
+                "record_count": filtered_count,
+                **({"detail": f"{fetched_count - filtered_count} 条因时间无效/窗口外被排除"} if fetched_count > filtered_count else {}),
+            }
+        return {"source": "东方财富", "status": STATUS_EMPTY, "record_count": 0}
+
+    def _sina_status(producing: bool, filtered_count: int, fetched_count: int) -> dict:
+        if sina_failed:
+            return {"source": "新浪财经", "status": STATUS_FAILED, "record_count": 0, "detail": "网络/服务故障"}
+        if producing:
+            return {
+                "source": "新浪财经", "status": STATUS_SUCCESSFUL if filtered_count else STATUS_EMPTY,
+                "record_count": filtered_count,
+                **({"detail": f"{fetched_count - filtered_count} 条因时间无效/窗口外被排除"} if fetched_count > filtered_count else {}),
+            }
+        return {"source": "新浪财经", "status": STATUS_EMPTY, "record_count": 0}
+
+    def _artifact(status: str, records: list[dict], source_statuses: list[dict],
+                  exclusions: dict, notes: list[str]) -> dict:
+        return {
+            "schema": SCHEMA_ARTIFACT,
+            "tool": "get_news",
+            "provenance": "a_stock",
+            "status": status,
+            "requested_window": {"ticker": code, "start": start_date, "end": end_date},
+            "records": records,
+            "source_statuses": source_statuses,
+            "exclusions": exclusions,
+            "coverage_notes": notes,
+        }
+
+    # Both sources failed → DataFailure (not success empty)
+    if em_failed and sina_failed:
+        return DataFailure(
+            f"[数据缺失: 个股新闻查询失败] 东方财富与新浪财经均不可用（网络/服务故障），"
+            f"不代表 {code} 在 {start_date} 至 {end_date} 无新闻。"
+        ), _artifact(
+            STATUS_FAILED, [], [
+                {"source": "东方财富", "status": STATUS_FAILED, "record_count": 0, "detail": "网络/服务故障"},
+                {"source": "新浪财经", "status": STATUS_FAILED, "record_count": 0, "detail": "网络/服务故障"},
+            ],
+            {}, ["东方财富与新浪财经均不可用，本次未获取任何个股新闻"],
+        )
+
     if not articles:
-        return f"No news found for A-stock '{code}'"
+        # Here EM returned 0 records or failed, and Sina (attempted as the
+        # fallback) also produced nothing. Honest per-source statuses:
+        # failed beats empty; overall partial if any source failed.
+        source_statuses = [_em_status(False, 0, 0), _sina_status(False, 0, 0)]
+        overall = STATUS_PARTIAL if (em_failed or sina_failed) else STATUS_EMPTY
+        notes = []
+        if em_failed and not sina_failed:
+            notes.append("东方财富新闻源不可用（本次结果仅来自新浪财经，不代表来源完备）")
+        return (
+            f"No news found for A-stock '{code}'",
+            _artifact(overall, [], source_statuses, {}, notes),
+        )
+
+    # Filter by publish time window; track exclusions
+    excluded_count = 0
+    excluded_reasons = []
+    invalid_time = 0
+    out_window = 0
+    filtered: list[dict] = []
+    filtered_pub: list[datetime] = []
+    for art in articles:
+        pub_dt = _parse_news_time(art.get("time", ""))
+        if pub_dt is None:
+            excluded_count += 1
+            invalid_time += 1
+            continue
+        if pub_dt < start_dt or pub_dt > end_dt:
+            excluded_count += 1
+            out_window += 1
+            continue
+        filtered.append(art)
+        filtered_pub.append(pub_dt)
+
+    fetched_count = len(articles)
+    filtered_count = len(filtered)
+    producing_is_em = source_label == "东方财富"
+    source_statuses = [
+        _em_status(producing_is_em, filtered_count, fetched_count),
+    ]
+    # Sina was attempted iff EM came back empty/failed but produced nothing.
+    if not producing_is_em:
+        source_statuses.append(_sina_status(True, filtered_count, fetched_count))
+    any_failure = em_failed or sina_failed
+    overall = (
+        STATUS_PARTIAL if any_failure
+        else (STATUS_SUCCESSFUL if filtered_count else STATUS_EMPTY)
+    )
+    exclusions = {}
+    if invalid_time:
+        exclusions["发布时间缺失/无效"] = invalid_time
+    if out_window:
+        exclusions["发布时间在窗口外"] = out_window
+    notes = []
+    if em_failed and not sina_failed:
+        notes.append("东方财富新闻源不可用（本次结果仅来自新浪财经，不代表来源完备）")
+
+    records = [
+        {
+            "source": (art.get("source") or source_label),
+            "title": art.get("title", ""),
+            "content": art.get("content", ""),
+            "url": ("" if art.get("url", "") in ("", "nan") else art.get("url", "")),
+            "published_at": pub_dt.isoformat(),
+            "time_precision": PRECISION_DATETIME,
+            "availability": AVAIL_PUBLICATION_ONLY,
+            # Stamped once per fetch (not per collection): replays of the
+            # same ToolMessage produce byte-identical evidence records.
+            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        }
+        for art, pub_dt in zip(filtered, filtered_pub)
+    ]
 
     news_str = ""
     count = 0
-    for art in articles:
-        pub_time = art.get("time", "")
-        try:
-            pub_dt = datetime.strptime(pub_time[:10], "%Y-%m-%d")
-            if pub_dt < start_dt or pub_dt > end_dt:
-                continue
-        except (ValueError, IndexError):
-            pass
-
+    for art in filtered:
         title = art["title"]
         content = art.get("content", "")
         source = art.get("source", source_label)
         link = art.get("url", "")
+        pub_time = art.get("time", "")
 
-        news_str += f"### {title} (source: {source})\n"
+        # Include publish time for traceability (Codex audit: must show 11:37 etc.)
+        time_note = f", published: {pub_time}" if pub_time else ""
+        news_str += f"### {title} (source: {source}{time_note})\n"
         if content:
             snippet = content[:300] + "..." if len(content) > 300 else content
             news_str += f"{snippet}\n"
@@ -1616,33 +1793,86 @@ def get_news(
         news_str += "\n"
         count += 1
 
+    # Partial source failure note (Codex audit: must be visible in output)
+    if em_failed and not sina_failed:
+        news_str += "---\n[注: 东方财富新闻源不可用（本次结果仅来自新浪财经，不代表来源完备）]\n\n"
+    elif sina_failed and not em_failed and not articles:
+        # EM succeeded with 0 records, Sina also tried and failed
+        news_str += "---\n[注: 新浪财经后备源不可用]\n\n"
+
     if count == 0:
+        if excluded_count > 0:
+            excluded_reasons.append(f"{excluded_count} 条记录时间无效/在窗口外")
+            return (
+                f"No news found for A-stock '{code}' "
+                f"between {start_date} and {end_date} "
+                f"(排除 {excluded_count} 条时间无效或窗口外记录)"
+            ), _artifact(overall, records, source_statuses, exclusions, notes)
         return (
             f"No news found for A-stock '{code}' "
             f"between {start_date} and {end_date}"
-        )
+        ), _artifact(overall, records, source_statuses, exclusions, notes)
+
+    if excluded_count > 0:
+        news_str += f"---\n[注: 另有 {excluded_count} 条记录因时间无效/在窗口外被排除]\n\n"
 
     return (
         f"## {code} (A-stock) News, from {start_date} to {end_date}:\n\n"
         + news_str
-    )
+    ), _artifact(overall, records, source_statuses, exclusions, notes)
+
+
+def get_news(
+    ticker: Annotated[str, "A-stock code"],
+    start_date: Annotated[str, "Start date yyyy-mm-dd"],
+    end_date: Annotated[str, "End date yyyy-mm-dd"],
+) -> str:
+    """Get stock-specific news via East Money direct API (Sina as fallback).
+
+    Distinguishes request failure from success-with-no-records: if both
+    sources fail the result is a ``DataFailure`` (not "No news found").
+    Records with missing/invalid/future publish time are excluded from
+    historical output with an exclusion note.
+    """
+    text, _payload = _get_news_with_payload(ticker, start_date, end_date)
+    return text
+
+
+def get_news_with_evidence(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+) -> tuple[str, dict]:
+    """Evidence-capable twin of :func:`get_news` — same fetch, both outputs."""
+    return _get_news_with_payload(ticker, start_date, end_date)
 
 
 # ---- 8. get_global_news ----
 
 
-def get_global_news(
-    curr_date: Annotated[str, "Current date yyyy-mm-dd"],
-    look_back_days: Annotated[int, "Days to look back"] = 7,
-    limit: Annotated[int, "Max articles"] = 10,
-) -> str:
-    """Get China/global financial news via direct HTTP (CLS + Eastmoney)."""
-    start_dt = datetime.strptime(curr_date, "%Y-%m-%d") - relativedelta(
-        days=look_back_days
-    )
+def _get_global_news_with_payload(
+    curr_date: str,
+    look_back_days: int = 7,
+    limit: int = 10,
+) -> tuple[str, dict]:
+    """Single global-news fetch producing (text, evidence artifact).
+
+    Mirrors :func:`get_global_news` byte-for-byte on the text side; the
+    artifact records only post-filter, post-dedup, post-limit records
+    (exactly what the text shows), per-source statuses, and split
+    exclusion counts (unknown time / outside window / dedup / limit).
+    """
+    start_dt = datetime.strptime(curr_date, "%Y-%m-%d").replace(
+        tzinfo=_SHANGHAY_TZ
+    ) - relativedelta(days=look_back_days)
+    end_dt = datetime.strptime(curr_date, "%Y-%m-%d").replace(
+        tzinfo=_SHANGHAY_TZ
+    ) + timedelta(days=1, microseconds=-1)
     start_date = start_dt.strftime("%Y-%m-%d")
 
     all_news: list[dict] = []
+    cls_failed = False
+    em_failed = False
 
     # Source 1: CLS wire (财联社快讯) — direct HTTP
     try:
@@ -1655,20 +1885,25 @@ def get_global_news(
             title = item.get("title", "") or item.get("brief", "")
             content = item.get("content", "") or item.get("brief", "")
             ctime = item.get("ctime", "")
-            # ctime is unix timestamp
+            # ctime is unix timestamp (UTC) → convert to Shanghai date for filtering
             pub_time = ""
+            pub_sh = None
             if ctime:
                 try:
-                    pub_time = datetime.fromtimestamp(int(ctime)).strftime("%Y-%m-%d %H:%M")
+                    dt_utc = datetime.fromtimestamp(int(ctime), tz=timezone.utc)
+                    pub_sh = dt_utc.astimezone(_SHANGHAY_TZ)
+                    pub_time = pub_sh.strftime("%Y-%m-%d %H:%M")
                 except (ValueError, TypeError, OSError):
                     pub_time = str(ctime)
             all_news.append({
                 "title": title,
                 "content": content,
                 "time": pub_time,
+                "pub_sh": pub_sh,
                 "source": "CLS Wire",
             })
     except Exception as e:
+        cls_failed = True
         logger.warning("CLS news fetch failed: %s", e)
 
     # Source 2: Eastmoney global (东财7x24资讯) — direct HTTP
@@ -1689,29 +1924,161 @@ def get_global_news(
             title = item.get("title", "")
             summary = item.get("summary", "")[:200]
             pub_time = item.get("showTime", "")
+            pub_sh = _parse_news_time(pub_time)
             all_news.append({
                 "title": title,
                 "content": summary,
                 "time": pub_time,
+                "pub_sh": pub_sh,
                 "source": "Eastmoney Global",
             })
     except Exception as e:
+        em_failed = True
         logger.warning("Eastmoney global news fetch failed: %s", e)
 
-    if not all_news:
-        return f"No global news found for {curr_date}"
+    def _artifact(status: str, records: list[dict], source_statuses: list[dict],
+                  exclusions: dict, notes: list[str]) -> dict:
+        return {
+            "schema": SCHEMA_ARTIFACT,
+            "tool": "get_global_news",
+            "provenance": "a_stock",
+            "status": status,
+            "requested_window": {"start": start_date, "end": curr_date, "look_back_days": look_back_days, "limit": limit},
+            "records": records,
+            "source_statuses": source_statuses,
+            "exclusions": exclusions,
+            "coverage_notes": notes,
+        }
 
-    # Deduplicate by title
+    def _cls_status(in_window: int) -> dict:
+        if cls_failed:
+            return {"source": "CLS Wire", "status": STATUS_FAILED, "record_count": 0, "detail": "网络/服务故障"}
+        return {
+            "source": "CLS Wire",
+            "status": STATUS_SUCCESSFUL if in_window else STATUS_EMPTY,
+            "record_count": in_window,
+            **({} if in_window else {"detail": "获取成功但无窗口内记录"}),
+        }
+
+    def _emg_status(in_window: int) -> dict:
+        if em_failed:
+            return {"source": "Eastmoney Global", "status": STATUS_FAILED, "record_count": 0, "detail": "网络/服务故障"}
+        return {
+            "source": "Eastmoney Global",
+            "status": STATUS_SUCCESSFUL if in_window else STATUS_EMPTY,
+            "record_count": in_window,
+            **({} if in_window else {"detail": "获取成功但无窗口内记录"}),
+        }
+
+    # Both sources failed → DataFailure
+    if cls_failed and em_failed:
+        return DataFailure(
+            f"[数据缺失: 宏观新闻查询失败] 财联社与东财全球资讯均不可用"
+            f"（网络/服务故障），不代表 {start_date} 至 {curr_date} 无新闻。"
+        ), _artifact(
+            STATUS_FAILED, [], [
+                {"source": "CLS Wire", "status": STATUS_FAILED, "record_count": 0, "detail": "网络/服务故障"},
+                {"source": "Eastmoney Global", "status": STATUS_FAILED, "record_count": 0, "detail": "网络/服务故障"},
+            ],
+            {}, ["财联社与东财全球资讯均不可用，本次未获取任何宏观新闻"],
+        )
+
+    if not all_news:
+        # Include partial source failure note even when no records exist
+        failure_note = ""
+        statuses = []
+        notes = []
+        if cls_failed and not em_failed:
+            failure_note = "\n[注: 财联社快讯源不可用（本次结果仅来自东财全球资讯）]"
+            statuses = [_emg_status(0), _cls_status(0)]
+            notes = ["财联社快讯源不可用（本次结果仅来自东财全球资讯）"]
+        elif em_failed and not cls_failed:
+            failure_note = "\n[注: 东财全球资讯源不可用（本次结果仅来自财联社快讯）]"
+            statuses = [_cls_status(0), _emg_status(0)]
+            notes = ["东财全球资讯源不可用（本次结果仅来自财联社快讯）"]
+        else:
+            statuses = [_cls_status(0), _emg_status(0)]
+        overall = STATUS_PARTIAL if (cls_failed or em_failed) else STATUS_EMPTY
+        return (
+            f"No global news found for {curr_date}{failure_note}",
+            _artifact(overall, [], statuses, {}, notes),
+        )
+
+    # Filter by analysis-time window FIRST (before dedup and limit)
+    unknown_count = 0
+    outside_count = 0
+    window_news = []
+    for n in all_news:
+        pub_sh = n.get("pub_sh")
+        if pub_sh is None:
+            unknown_count += 1
+            continue  # Missing/invalid time: excluded from historical output
+        if pub_sh < start_dt or pub_sh > end_dt:
+            outside_count += 1
+            continue  # Outside window (Shanghai day boundary)
+        window_news.append(n)
+
+    # Deduplicate by title (after filtering)
     seen: set[str] = set()
     unique: list[dict] = []
-    for n in all_news:
+    for n in window_news:
         if n["title"] not in seen:
             seen.add(n["title"])
             unique.append(n)
+    dedup_removed = len(window_news) - len(unique)
+    kept = unique[:limit]
+    limit_dropped = len(unique) - len(kept)
+
+    cls_in_window = sum(1 for n in window_news if n.get("source") == "CLS Wire")
+    emg_in_window = sum(1 for n in window_news if n.get("source") == "Eastmoney Global")
+    any_failure = cls_failed or em_failed
+    overall = (
+        STATUS_PARTIAL if any_failure
+        else (STATUS_SUCCESSFUL if kept else STATUS_EMPTY)
+    )
+    exclusions = {}
+    if unknown_count:
+        exclusions["发布时间缺失/无效"] = unknown_count
+    if outside_count:
+        exclusions["发布时间在窗口外"] = outside_count
+    if dedup_removed:
+        exclusions["跨来源标题去重"] = dedup_removed
+    if limit_dropped:
+        exclusions["超出 limit 截断"] = limit_dropped
+    notes = []
+    if limit_dropped:
+        notes.append(f"窗口内去重后共 {len(unique)} 条，超出 limit={limit} 仅保留前 {len(kept)} 条")
+    if cls_failed and not em_failed:
+        notes.append("财联社快讯源不可用（本次结果仅来自东财全球资讯）")
+    elif em_failed and not cls_failed:
+        notes.append("东财全球资讯源不可用（本次结果仅来自财联社快讯）")
+
+    # Only records the text actually shows (post-filter/dedup/limit) enter
+    # the evidence index — full ISO publish time keeps the timezone, and
+    # retrieved_at is stamped once per fetch for replay-stable records.
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    records = [
+        {
+            "source": n.get("source", ""),
+            "title": n.get("title", ""),
+            "content": n.get("content", ""),
+            "url": n.get("url", ""),
+            "published_at": n["pub_sh"].isoformat(),
+            "time_precision": PRECISION_DATETIME,
+            "availability": AVAIL_PUBLICATION_ONLY,
+            "retrieved_at": fetched_at,
+        }
+        for n in kept
+    ]
 
     news_str = ""
-    for n in unique[:limit]:
-        news_str += f"### {n['title']} (source: {n['source']})\n"
+    for n in kept:
+        pub_sh = n.get("pub_sh")
+        display_time = pub_sh.strftime("%Y-%m-%d %H:%M") if pub_sh else n.get("time", "")
+        news_str += f"### {n['title']} (source: {n['source']}"
+        if display_time:
+            news_str += f", published: {display_time}"
+        news_str += ")\n"
         if n.get("content"):
             snippet = (
                 n["content"][:300] + "..."
@@ -1721,10 +2088,64 @@ def get_global_news(
             news_str += f"{snippet}\n"
         news_str += "\n"
 
+    if unknown_count > 0:
+        news_str += (
+            f"---\n[注: 另有 {unknown_count} 条记录因发布时间缺失/无效被排除"
+            f"（unknown，不计入历史分析）]\n\n"
+        )
+
+    # Partial source failure notes (Codex audit: visible in output, not just logged)
+    if cls_failed and not em_failed:
+        news_str += "---\n[注: 财联社快讯源不可用（本次结果仅来自东财全球资讯）]\n\n"
+    elif em_failed and not cls_failed:
+        news_str += "---\n[注: 东财全球资讯源不可用（本次结果仅来自财联社快讯）]\n\n"
+
+    source_statuses = [_cls_status(cls_in_window), _emg_status(emg_in_window)]
+
+    if not unique:
+        note = "[历史覆盖不足] 本次获取的快讯均发布在请求窗口之外"
+        if unknown_count > 0:
+            note += f"（另有 {unknown_count} 条时间缺失/无效记录被排除，unknown）"
+        note += f"（{start_date} 至 {curr_date}），无法确认该历史区间有可用新闻。\n"
+        # Partial source failure notes (visible even when no records in window)
+        if cls_failed and not em_failed:
+            note += "[注: 财联社快讯源不可用]\n"
+        elif em_failed and not cls_failed:
+            note += "[注: 东财全球资讯源不可用]\n"
+        return (
+            f"## China & Global Market News, from {start_date} to {curr_date}:\n\n"
+            f"{note}"
+        ), _artifact(overall, records, source_statuses, exclusions, notes)
+
     return (
         f"## China & Global Market News, from {start_date} to {curr_date}:\n\n"
         + news_str
-    )
+    ), _artifact(overall, records, source_statuses, exclusions, notes)
+
+
+def get_global_news(
+    curr_date: Annotated[str, "Current date yyyy-mm-dd"],
+    look_back_days: Annotated[int, "Days to look back"] = 7,
+    limit: Annotated[int, "Max articles"] = 10,
+) -> str:
+    """Get China/global financial news via direct HTTP (CLS + Eastmoney).
+
+    Filters by the analysis-time window [start_date, curr_date] BEFORE
+    deduplication and limit. Records with missing/invalid publish time are
+    excluded (marked as unknown) with an exclusion note. When both sources
+    fail, returns a ``DataFailure`` rather than a success-empty string.
+    """
+    text, _payload = _get_global_news_with_payload(curr_date, look_back_days, limit)
+    return text
+
+
+def get_global_news_with_evidence(
+    curr_date: str,
+    look_back_days: int = 7,
+    limit: int = 10,
+) -> tuple[str, dict]:
+    """Evidence-capable twin of :func:`get_global_news` — same fetch, both outputs."""
+    return _get_global_news_with_payload(curr_date, look_back_days, limit)
 
 
 # ---- 9. get_insider_transactions ----

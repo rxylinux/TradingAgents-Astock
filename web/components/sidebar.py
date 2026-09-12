@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from datetime import date
 
+from pathlib import Path
 import streamlit as st
 
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -322,6 +324,74 @@ def render_sidebar() -> None:
         value=date.today(),
         key="input_date",
     )
+
+    with st.expander("高级：财务面板（可复算，可选）", expanded=False):
+        st.caption(
+            "D2 离线入口：提供显式 manifest JSON 才注入财务面板（缺省一律不注入，"
+            "指数也不会伪造财务输入）。失效会在准备期快速失败，不产生模型调用；"
+            "断点恢复只读已保存的面板，不依赖该文件仍在。"
+        )
+        panel_path = st.text_input(
+            "本机 manifest JSON 路径",
+            value="",
+            key="financial_panel_manifest_path",
+            help="例：/path/to/manifest.json（明确标注的本机路径，服务器本地文件）",
+        )
+        panel_upload = st.file_uploader(
+            "或上传 manifest JSON",
+            type=["json"],
+            key="financial_panel_manifest_upload",
+            help="上传内容写入本次会话的独立临时目录；不改用户历史/缓存，恢复不依赖它",
+        )
+        chosen = panel_path.strip()
+        if not chosen and panel_upload is not None:
+            try:
+                raw_bytes = panel_upload.getvalue()
+                if len(raw_bytes) > 2 * 1024 * 1024:
+                    st.warning("上传文件超过 2MB 上限，已忽略。")
+                else:
+                    raw_bytes.decode("utf-8")  # 预检 UTF-8（真实校验在准备期）
+                    upload_dir = Path(tempfile.mkdtemp(prefix="financial_panel_"))
+                    upload_path = upload_dir / "manifest.json"
+                    upload_path.write_bytes(raw_bytes)
+                    chosen = str(upload_path)
+            except UnicodeDecodeError:
+                st.warning("上传文件不是 UTF-8 文本，已忽略。")
+        st.session_state["financial_panel_manifest"] = chosen or None
+
+    with st.expander("高级：历史经验投影（只读，可选）", expanded=False):
+        st.caption(
+            "F2 只读入口：提供显式 F1 记录 JSONL 才注入历史经验投影（缺省一律不"
+            "注入）。文件在准备期完整校验，失效快速失败不产生模型调用；断点恢复"
+            "只读已保存的投影，不依赖该文件仍在。"
+        )
+        rr_path = st.text_input(
+            "本机 F1 记录 JSONL 路径",
+            value="",
+            key="review_records_path_input",
+            help="例：/path/to/records.jsonl（明确标注的本机路径）",
+        )
+        rr_upload = st.file_uploader(
+            "或上传 F1 记录 JSONL",
+            type=["json", "jsonl", "txt"],
+            key="review_records_upload",
+            help="上传内容写入本次会话独立临时目录；不改用户历史/缓存，恢复不依赖它",
+        )
+        rr_chosen = rr_path.strip()
+        if not rr_chosen and rr_upload is not None:
+            try:
+                rr_bytes = rr_upload.getvalue()
+                if len(rr_bytes) > 2 * 1024 * 1024:
+                    st.warning("上传文件超过 2MB 上限，已忽略。")
+                else:
+                    rr_bytes.decode("utf-8")
+                    rr_dir = Path(tempfile.mkdtemp(prefix="review_records_"))
+                    rr_file = rr_dir / "records.jsonl"
+                    rr_file.write_bytes(rr_bytes)
+                    rr_chosen = str(rr_file)
+            except UnicodeDecodeError:
+                st.warning("上传文件不是 UTF-8 文本，已忽略。")
+        st.session_state["review_records_path"] = rr_chosen or None
 
     start_date = st.date_input(
         "数据起始日期",

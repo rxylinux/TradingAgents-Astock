@@ -198,6 +198,14 @@ def _build_config(run_request: dict | None = None) -> dict:
     config["max_risk_discuss_rounds"] = 1
     config["checkpoint_enabled"] = True
     config["output_language"] = "Chinese"
+    # D2: 显式财务面板 manifest（侧栏高级选项；缺省 None=不注入，个股/指数一致）
+    panel_manifest = st.session_state.get("financial_panel_manifest")
+    if panel_manifest:
+        config["financial_panel_manifest"] = panel_manifest
+    # F2: 显式历史复盘记录（缺省 None=不注入）
+    review_path = st.session_state.get("review_records_path")
+    if review_path:
+        config["review_records_path"] = review_path
     # 分析类型：指数走指数图（指数版分析师/辩论/决策 prompt），个股=原行为。
     # A09: 类型来自本次任务请求；指数模式的分析师集合统一为指数预设
     # （fundamentals/lockup 不适用），后台图与进度阶段使用同一份配置。

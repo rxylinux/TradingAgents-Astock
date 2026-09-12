@@ -1,6 +1,8 @@
-from typing import Annotated
+from typing import Annotated, Optional
 from typing_extensions import TypedDict
 from langgraph.graph import MessagesState, add_messages
+
+from tradingagents.evidence.ledger import evidence_reducer
 
 
 # Researcher team state
@@ -61,6 +63,13 @@ class AgentState(MessagesState):
     hot_money_messages: Annotated[list, add_messages]
     lockup_messages: Annotated[list, add_messages]
 
+    # C1: 证据账本——各分支工具节点把本次执行的 ToolMessage artifact 以
+    # 增量（delta）写入，reducer 不可变合并：事件以 ``{role}:{tool_call_id}``
+    # 为稳定身份（重放不倍增），run_id 不匹配的增量整体拒绝（并发运行/
+    # 陈旧线程不串证据），输出顺序确定（并发分支写入顺序不影响结果）。
+    # 旧 state 无此字段 → 兼容（保持 None，工具不写入时不产生）。
+    evidence_bundle: Annotated[Optional[dict], evidence_reducer]
+
     # research step
     market_report: Annotated[str, "Report from the Market Analyst"]
     sentiment_report: Annotated[str, "Report from the Social Media Analyst"]
@@ -98,3 +107,20 @@ class AgentState(MessagesState):
     # N02: 本次运行的身份与公开配置档案。SQLite 恢复保留原 ID/配置/时间；
     # 旧断点缺失时标示未记录，不得以恢复时配置伪装原配置。
     run_metadata: Annotated[dict, "Run identity and public config profile (N02)"]
+    # C2: 研究假设卡——组合经理既有结构化调用产出的结论结构化记录（引用
+    # 校验/评估状态/uncalibrated 全部代码确定性生成）。仅 PM 写入；旧 state
+    # 无此字段 → 兼容（None，展示端显示未记录）。
+    thesis_card: Annotated[Optional[dict], "Structured research thesis card (C2)"]
+    # D1: 可复算财务面板——离线 manifest 经纯函数计算的确定性卡片；图内
+    # 无人写入（D2 再接显式注入），默认缺失 → 兼容（None=未记录）。
+    financial_panel: Annotated[Optional[dict], "Reproducible financial panel card (D1)"]
+    # E: 独立初判与有界反证补查（默认关闭 → 字段缺失 = 旧行为）。两个初判
+    # 字段由并行互盲节点各自写入；evidence_debate 汇总分歧/补查/usage 并随
+    # checkpoint 持久化（恢复不重跑已消费槽位、不重置预算）。
+    initial_view_bull: Annotated[Optional[dict], "Bull independent initial view (E)"]
+    initial_view_bear: Annotated[Optional[dict], "Bear independent initial view (E)"]
+    evidence_debate: Annotated[Optional[dict], "Disagreement plan + bounded rechecks + usage (E)"]
+    # F2: 历史经验只读投影——独立持久 payload（不拼入 past_context）；fresh
+    # 准备期构建，恢复只读校验。缺省（未配置 review_records_path）→ 字段缺
+    # 失 = 旧行为。
+    review_projection: Annotated[Optional[dict], "Read-only review-record projection (F2)"]

@@ -1131,7 +1131,9 @@ def _run_fundflow_report(config: dict, selections: dict) -> None:
     console.print(f"[green]报告已保存:[/green] {out}")
 
 
-def run_analysis(checkpoint: bool = False, analysis_type: str | None = None):
+def run_analysis(checkpoint: bool = False, analysis_type: str | None = None,
+                 financial_panel_manifest: str | None = None,
+                 review_records_path: str | None = None):
     # First get all user selections
     selections = get_user_selections(forced_type=analysis_type)
 
@@ -1153,6 +1155,12 @@ def run_analysis(checkpoint: bool = False, analysis_type: str | None = None):
     config["instrument_type"] = (
         "index" if selections.get("analysis_type") == "指数" else "stock"
     )
+    # D2: 显式财务面板 manifest（缺省不注入；恢复路径不读它）
+    if financial_panel_manifest:
+        config["financial_panel_manifest"] = financial_panel_manifest
+    # F2: 显式历史复盘记录（缺省不注入；恢复路径不读它）
+    if review_records_path:
+        config["review_records_path"] = review_records_path
 
     # 资金流向：轻量路径，拉数据 + 1 次模型调用出报告，不走多 Agent 流水线
     if selections.get("analysis_type") == "资金流向":
@@ -1497,6 +1505,16 @@ def _default(
         "--clear-checkpoints",
         help="Delete all saved checkpoints before running (force fresh start).",
     ),
+    financial_panel_manifest: str = typer.Option(
+        "",
+        "--financial-panel-manifest",
+        help="D2: 显式财务面板 manifest JSON 路径（缺省不注入面板）。",
+    ),
+    review_records_path: str = typer.Option(
+        "",
+        "--review-records",
+        help="F2: 显式历史复盘记录 JSONL 路径（缺省不注入投影）。",
+    ),
 ):
     """裸跑 `tradingagents`（不带子命令）＝ 直接开始分析。
 
@@ -1507,7 +1525,9 @@ def _default(
     """
     if ctx.invoked_subcommand is not None:
         return
-    analyze(checkpoint=checkpoint, clear_checkpoints=clear_checkpoints)
+    analyze(checkpoint=checkpoint, clear_checkpoints=clear_checkpoints,
+            financial_panel_manifest=financial_panel_manifest,
+            review_records_path=review_records_path)
 
 
 @app.command()
@@ -1522,12 +1542,30 @@ def analyze(
         "--clear-checkpoints",
         help="Delete all saved checkpoints before running (force fresh start).",
     ),
+    financial_panel_manifest: str = typer.Option(
+        "",
+        "--financial-panel-manifest",
+        help=(
+            "D2: 显式财务面板 manifest JSON 路径（离线输入；缺省不注入面板）。"
+            "失效时在准备期快速失败，不产生任何模型调用。"
+        ),
+    ),
+    review_records_path: str = typer.Option(
+        "",
+        "--review-records",
+        help=(
+            "F2: 显式历史复盘记录 JSONL 路径（只读投影；缺省不注入）。"
+            "失效时在准备期快速失败，不产生任何模型调用。"
+        ),
+    ),
 ):
     if clear_checkpoints:
         from tradingagents.graph.checkpointer import clear_all_checkpoints
         n = clear_all_checkpoints(DEFAULT_CONFIG["data_cache_dir"])
         console.print(f"[yellow]Cleared {n} checkpoint(s).[/yellow]")
-    run_analysis(checkpoint=checkpoint)
+    run_analysis(checkpoint=checkpoint,
+                 financial_panel_manifest=financial_panel_manifest or None,
+                 review_records_path=review_records_path or None)
 
 
 @app.command()
